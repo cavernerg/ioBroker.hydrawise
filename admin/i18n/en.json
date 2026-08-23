@@ -1,5 +1,19 @@
 {
+    "account email": "Hydrawise account e-mail",
+    "account password": "Hydrawise account password",
     "api interval": "API interval (in seconds)",
     "api key": "API-Key",
-    "how to get token": "How to get a token"
+    "controller id": "Controller ID (0 = first controller)",
+    "controller id help": "Only needed if the account has more than one controller",
+    "customer interval": "customerdetails interval (in minutes)",
+    "customer interval help": "The API allows only 5 requests per 5 minutes to this endpoint. The data (controller name, serial number) barely changes.",
+    "header v1": "API v1 (REST) - control and schedule",
+    "header v2": "API v2 (GraphQL) - water usage and sensors",
+    "how to get token": "How to get a token",
+    "leak threshold": "Leak threshold (volume per day)",
+    "leak threshold help": "Sets water.leakSuspected when more water flowed today than the watering runs account for. In the unit of your account (litres/gallons), 0 disables the check.",
+    "use v2": "Use API v2",
+    "v2 hint": "The v1 API cannot report water usage. The v2 API used by the Hydrawise app reports flow meter volumes, per zone water usage, sensor states and rainfall - it needs the e-mail address and password of your Hydrawise account.",
+    "v2 interval": "API v2 interval (in minutes)",
+    "weather states": "Create weather/rainfall states"
 }

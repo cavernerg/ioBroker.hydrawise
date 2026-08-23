@@ -1,5 +1,19 @@
 {
+    "account email": "Correo electrónico de la cuenta Hydrawise",
+    "account password": "Contraseña de la cuenta Hydrawise",
     "api interval": "Intervalo API (en segundos)",
     "api key": "Clave API",
-    "how to get token": "Como conseguir ficha"
+    "controller id": "ID del controlador (0 = primer controlador)",
+    "controller id help": "Solo es necesario si la cuenta tiene más de un controlador",
+    "customer interval": "Intervalo de customerdetails (en minutos)",
+    "customer interval help": "La API solo permite 5 solicitudes cada 5 minutos a este endpoint. Los datos (nombre del controlador, número de serie) apenas cambian.",
+    "header v1": "API v1 (REST) - control y programación",
+    "header v2": "API v2 (GraphQL) - consumo de agua y sensores",
+    "how to get token": "Como conseguir ficha",
+    "leak threshold": "Umbral de fuga (volumen por día)",
+    "leak threshold help": "Activa water.leakSuspected cuando hoy ha circulado más agua de la que explican los riegos. En la unidad de su cuenta (litros/galones), 0 desactiva la comprobación.",
+    "use v2": "Usar la API v2",
+    "v2 hint": "La API v1 no puede informar del consumo de agua. La API v2 que utiliza la aplicación Hydrawise proporciona los volúmenes del caudalímetro, el consumo de agua por zona, los estados de los sensores y la lluvia; para ello necesita el correo electrónico y la contraseña de su cuenta Hydrawise.",
+    "v2 interval": "Intervalo de la API v2 (en minutos)",
+    "weather states": "Crear puntos de datos de tiempo/lluvia"
 }

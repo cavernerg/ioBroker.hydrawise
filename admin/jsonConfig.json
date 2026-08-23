@@ -2,6 +2,17 @@
     "i18n": true,
     "type": "panel",
     "items": {
+        "_headerV1": {
+            "type": "header",
+            "text": "header v1",
+            "size": 2,
+            "newLine": true,
+            "xs": 12,
+            "sm": 12,
+            "md": 12,
+            "lg": 12,
+            "xl": 12
+        },
         "apiKey": {
             "type": "text",
             "label": "api key",
@@ -14,6 +25,146 @@
             "lg": 4,
             "xl": 4
         },
-        "apiInterval": { "type": "number", "label": "api interval", "newLine": true, "default": 60, "min": 15, "xs": 12, "sm": 12, "md": 6, "lg": 4, "xl": 4 }
+        "apiInterval": {
+            "type": "number",
+            "label": "api interval",
+            "newLine": true,
+            "default": 60,
+            "min": 15,
+            "xs": 12,
+            "sm": 12,
+            "md": 6,
+            "lg": 4,
+            "xl": 4
+        },
+        "customerInterval": {
+            "type": "number",
+            "label": "customer interval",
+            "help": "customer interval help",
+            "default": 30,
+            "min": 5,
+            "max": 1440,
+            "xs": 12,
+            "sm": 12,
+            "md": 6,
+            "lg": 4,
+            "xl": 4
+        },
+        "_dividerV2": {
+            "type": "divider",
+            "newLine": true,
+            "xs": 12,
+            "sm": 12,
+            "md": 12,
+            "lg": 12,
+            "xl": 12
+        },
+        "_headerV2": {
+            "type": "header",
+            "text": "header v2",
+            "size": 2,
+            "newLine": true,
+            "xs": 12,
+            "sm": 12,
+            "md": 12,
+            "lg": 12,
+            "xl": 12
+        },
+        "_hintV2": {
+            "type": "staticText",
+            "text": "v2 hint",
+            "newLine": true,
+            "xs": 12,
+            "sm": 12,
+            "md": 12,
+            "lg": 8,
+            "xl": 8
+        },
+        "useV2": {
+            "type": "checkbox",
+            "label": "use v2",
+            "default": false,
+            "newLine": true,
+            "xs": 12,
+            "sm": 12,
+            "md": 6,
+            "lg": 4,
+            "xl": 4
+        },
+        "email": {
+            "type": "text",
+            "label": "account email",
+            "hidden": "!data.useV2",
+            "newLine": true,
+            "xs": 12,
+            "sm": 12,
+            "md": 6,
+            "lg": 4,
+            "xl": 4
+        },
+        "password": {
+            "type": "password",
+            "label": "account password",
+            "repeat": false,
+            "visible": true,
+            "hidden": "!data.useV2",
+            "xs": 12,
+            "sm": 12,
+            "md": 6,
+            "lg": 4,
+            "xl": 4
+        },
+        "v2Interval": {
+            "type": "number",
+            "label": "v2 interval",
+            "default": 5,
+            "min": 2,
+            "max": 1440,
+            "hidden": "!data.useV2",
+            "newLine": true,
+            "xs": 12,
+            "sm": 12,
+            "md": 6,
+            "lg": 4,
+            "xl": 4
+        },
+        "v2ControllerId": {
+            "type": "number",
+            "label": "controller id",
+            "help": "controller id help",
+            "default": 0,
+            "min": 0,
+            "hidden": "!data.useV2",
+            "xs": 12,
+            "sm": 12,
+            "md": 6,
+            "lg": 4,
+            "xl": 4
+        },
+        "leakThreshold": {
+            "type": "number",
+            "label": "leak threshold",
+            "help": "leak threshold help",
+            "default": 20,
+            "min": 0,
+            "hidden": "!data.useV2",
+            "newLine": true,
+            "xs": 12,
+            "sm": 12,
+            "md": 6,
+            "lg": 4,
+            "xl": 4
+        },
+        "v2Weather": {
+            "type": "checkbox",
+            "label": "weather states",
+            "default": true,
+            "hidden": "!data.useV2",
+            "xs": 12,
+            "sm": 12,
+            "md": 6,
+            "lg": 4,
+            "xl": 4
+        }
     }
 }

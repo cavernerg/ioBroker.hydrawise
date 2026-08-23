@@ -1,8 +1,21 @@
 {
   "common": {
     "name": "hydrawise",
-    "version": "1.0.6",
+    "version": "1.1.0",
     "news": {
+      "1.1.0": {
+        "en": "added support for the Hydrawise v2 API (water usage, sensor states, zone reports, rainfall, leak detection)",
+        "de": "Unterstützung für die Hydrawise-v2-API ergänzt (Wasserverbrauch, Sensorzustände, Zonen-Reports, Regenmenge, Leck-Erkennung)",
+        "ru": "добавлена поддержка Hydrawise API v2 (расход воды, состояния датчиков, отчёты по зонам, осадки, обнаружение утечек)",
+        "pt": "suporte para a API v2 do Hydrawise (consumo de água, estados dos sensores, relatórios por zona, precipitação, deteção de fugas)",
+        "nl": "ondersteuning voor de Hydrawise v2-API (waterverbruik, sensorstatussen, zonerapporten, regenval, lekdetectie)",
+        "fr": "prise en charge de l'API v2 Hydrawise (consommation d'eau, états des capteurs, rapports par zone, précipitations, détection de fuite)",
+        "it": "supporto per l'API v2 di Hydrawise (consumo di acqua, stati dei sensori, report per zona, pioggia, rilevamento perdite)",
+        "es": "soporte para la API v2 de Hydrawise (consumo de agua, estados de sensores, informes por zona, lluvia, detección de fugas)",
+        "pl": "obsługa API v2 Hydrawise (zużycie wody, stany czujników, raporty stref, opady, wykrywanie wycieków)",
+        "uk": "підтримка Hydrawise API v2 (витрата води, стани датчиків, звіти по зонах, опади, виявлення витоків)",
+        "zh-cn": "增加对 Hydrawise v2 API 的支持（用水量、传感器状态、分区报告、降雨量、漏水检测）"
+      },
       "1.0.6": {
         "en": "updated dependencies\nAdapter requires node.js >= 22 now",
         "de": "aktualisierte abhängigkeiten\nAdapter benötigt node.js >= 22 jetzt",
@@ -80,19 +93,6 @@
         "pl": "dodane sprawdzenie zgodności i testowanie na node.js 22",
         "uk": "додано перевірку сумісності та тестування для node.js 22",
         "zh-cn": "为节点.js 22 添加兼容性检查和测试"
-      },
-      "1.0.0": {
-        "en": "fixed adapter crash after dns not reachable",
-        "de": "fester adapterabsturz nach dns nicht erreichbar",
-        "ru": "крушение фиксированного адаптера после того, как днс недоступен",
-        "pt": "trava do adaptador fixo após dns não alcançável",
-        "nl": "vaste adapter crash na dns niet bereikbaar",
-        "fr": "crash de l'adaptateur fixe après dns inaccessible",
-        "it": "crash adattatore fisso dopo dns non raggiungibile",
-        "es": "ajuste fijo estrella después de dns no alcanzable",
-        "pl": "stałe zderzenie adaptera po dns nie osiągalne",
-        "uk": "фіксована аварійна аварія після dns не досягається",
-        "zh-cn": "dns 无法到达后固定适配器崩溃"
       }
     },
     "titleLang": {
@@ -163,13 +163,23 @@
   },
   "native": {
     "apiKey": "",
-    "apiInterval": 60
+    "apiInterval": 60,
+    "customerInterval": 30,
+    "useV2": false,
+    "email": "",
+    "password": "",
+    "v2Interval": 5,
+    "v2ControllerId": 0,
+    "leakThreshold": 20,
+    "v2Weather": true
   },
   "encryptedNative": [
-    "apiKey"
+    "apiKey",
+    "password"
   ],
   "protectedNative": [
-    "apiKey"
+    "apiKey",
+    "password"
   ],
   "objects": [],
   "instanceObjects": [
@@ -187,6 +197,19 @@
       "common": {
         "role": "indicator.connected",
         "name": "Device or service connected",
+        "type": "boolean",
+        "read": true,
+        "write": false,
+        "def": false
+      },
+      "native": {}
+    },
+    {
+      "_id": "info.connectionV2",
+      "type": "state",
+      "common": {
+        "role": "indicator.connected",
+        "name": "v2 API connected",
         "type": "boolean",
         "read": true,
         "write": false,

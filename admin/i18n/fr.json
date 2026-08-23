@@ -1,5 +1,19 @@
 {
+    "account email": "Adresse e-mail du compte Hydrawise",
+    "account password": "Mot de passe du compte Hydrawise",
     "api interval": "Intervalle API (en secondes)",
     "api key": "Clé API",
-    "how to get token": "Comment obtenir un jeton"
+    "controller id": "ID du contrôleur (0 = premier contrôleur)",
+    "controller id help": "Nécessaire uniquement si le compte possède plusieurs contrôleurs",
+    "customer interval": "Intervalle customerdetails (en minutes)",
+    "customer interval help": "L'API n'autorise que 5 requêtes par tranche de 5 minutes sur ce point de terminaison. Les données (nom du contrôleur, numéro de série) ne changent quasiment pas.",
+    "header v1": "API v1 (REST) - commande et programmation",
+    "header v2": "API v2 (GraphQL) - consommation d'eau et capteurs",
+    "how to get token": "Comment obtenir un jeton",
+    "leak threshold": "Seuil de fuite (volume par jour)",
+    "leak threshold help": "Active water.leakSuspected lorsque plus d'eau a circulé aujourd'hui que ne l'expliquent les arrosages. Dans l'unité de votre compte (litres/gallons), 0 désactive le contrôle.",
+    "use v2": "Utiliser l'API v2",
+    "v2 hint": "L'API v1 ne peut pas fournir la consommation d'eau. L'API v2 utilisée par l'application Hydrawise fournit les volumes des débitmètres, la consommation d'eau par zone, l'état des capteurs et les précipitations - elle nécessite l'adresse e-mail et le mot de passe de votre compte Hydrawise.",
+    "v2 interval": "Intervalle de l'API v2 (en minutes)",
+    "weather states": "Créer les points de données météo/pluie"
 }

@@ -1,5 +1,19 @@
 {
+    "account email": "E-mailadres van het Hydrawise-account",
+    "account password": "Wachtwoord van het Hydrawise-account",
     "api interval": "API-interval (in seconden)",
     "api key": "API sleutel",
-    "how to get token": "Hoe een token te verkrijgen"
+    "controller id": "Controller-ID (0 = eerste controller)",
+    "controller id help": "Alleen nodig als het account meer dan één controller heeft",
+    "customer interval": "customerdetails-interval (in minuten)",
+    "customer interval help": "De API staat voor dit eindpunt slechts 5 aanvragen per 5 minuten toe. De gegevens (controllernaam, serienummer) veranderen nauwelijks.",
+    "header v1": "API v1 (REST) - besturing en schema",
+    "header v2": "API v2 (GraphQL) - waterverbruik en sensoren",
+    "how to get token": "Hoe een token te verkrijgen",
+    "leak threshold": "Lekdrempel (volume per dag)",
+    "leak threshold help": "Zet water.leakSuspected wanneer er vandaag meer water is gestroomd dan de beregeningen verklaren. In de eenheid van je account (liters/gallons), 0 schakelt de controle uit.",
+    "use v2": "API v2 gebruiken",
+    "v2 hint": "De v1-API kan geen waterverbruik leveren. De v2-API die de Hydrawise-app gebruikt, levert doorstroomvolumes, waterverbruik per zone, sensorstatussen en regenval - daarvoor zijn het e-mailadres en het wachtwoord van je Hydrawise-account nodig.",
+    "v2 interval": "API v2-interval (in minuten)",
+    "weather states": "Weer-/regendatapunten aanmaken"
 }

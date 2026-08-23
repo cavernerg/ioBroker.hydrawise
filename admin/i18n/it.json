@@ -1,5 +1,19 @@
 {
+    "account email": "E-mail dell'account Hydrawise",
+    "account password": "Password dell'account Hydrawise",
     "api interval": "Intervallo API (in secondi)",
     "api key": "Chiave API",
-    "how to get token": "Come ottenere il gettone"
+    "controller id": "ID del controller (0 = primo controller)",
+    "controller id help": "Necessario solo se l'account ha più di un controller",
+    "customer interval": "Intervallo customerdetails (in minuti)",
+    "customer interval help": "L'API consente solo 5 richieste ogni 5 minuti su questo endpoint. I dati (nome del controller, numero di serie) cambiano raramente.",
+    "header v1": "API v1 (REST) - controllo e programmazione",
+    "header v2": "API v2 (GraphQL) - consumo d'acqua e sensori",
+    "how to get token": "Come ottenere il gettone",
+    "leak threshold": "Soglia di perdita (volume al giorno)",
+    "leak threshold help": "Imposta water.leakSuspected quando oggi è defluita più acqua di quanta ne spieghino le irrigazioni. Nell'unità del tuo account (litri/galloni), 0 disattiva il controllo.",
+    "use v2": "Usa l'API v2",
+    "v2 hint": "L'API v1 non può fornire il consumo d'acqua. L'API v2 usata dall'app Hydrawise fornisce i volumi dei flussometri, il consumo d'acqua per zona, gli stati dei sensori e la pioggia: richiede l'indirizzo e-mail e la password del tuo account Hydrawise.",
+    "v2 interval": "Intervallo dell'API v2 (in minuti)",
+    "weather states": "Crea i punti dati meteo/pioggia"
 }

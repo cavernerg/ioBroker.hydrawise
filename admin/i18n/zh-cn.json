@@ -1,5 +1,19 @@
 {
+    "account email": "Hydrawise 账户邮箱",
+    "account password": "Hydrawise 账户密码",
     "api interval": "API 间隔（以秒为单位）",
     "api key": "API密钥",
-    "how to get token": "如何获取代币"
+    "controller id": "控制器 ID（0 = 第一个控制器）",
+    "controller id help": "仅当账户有多个控制器时才需要",
+    "customer interval": "customerdetails 间隔（以分钟为单位）",
+    "customer interval help": "该接口每 5 分钟只允许 5 次请求。这些数据（控制器名称、序列号）几乎不会变化。",
+    "header v1": "API v1（REST）- 控制与计划",
+    "header v2": "API v2（GraphQL）- 用水量与传感器",
+    "how to get token": "如何获取代币",
+    "leak threshold": "漏水阈值（每日水量）",
+    "leak threshold help": "当今天的流水量超过灌溉运行所能解释的量时，设置 water.leakSuspected。使用账户的单位（升/加仑），设为 0 则关闭该检查。",
+    "use v2": "使用 API v2",
+    "v2 hint": "v1 接口无法提供用水量。Hydrawise 应用所使用的 v2 接口可提供流量计水量、各分区用水量、传感器状态和降雨量 — 这需要 Hydrawise 账户的邮箱地址和密码。",
+    "v2 interval": "API v2 间隔（以分钟为单位）",
+    "weather states": "创建天气/降雨数据点"
 }

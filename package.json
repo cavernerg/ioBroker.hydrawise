@@ -1,6 +1,6 @@
 {
   "name": "iobroker.hydrawise",
-  "version": "1.0.6",
+  "version": "1.1.0",
   "description": "Adapter to control the Hydrawise irrigation control system",
   "author": {
     "name": "SentiQ",
@@ -69,6 +69,7 @@
     "coverage": "nyc npm run test:ts",
     "lint": "eslint -c eslint.config.mjs .",
     "translate": "translate-adapter",
+    "validate:translations": "node scripts/validate-translations.js",
     "release": "release-script patch --yes",
     "release-minor": "release-script minor --yes",
     "release-major": "release-script major --yes"

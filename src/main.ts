@@ -6,6 +6,17 @@
 // you need to create an adapter
 import * as utils from '@iobroker/adapter-core';
 import axios from 'axios';
+import {
+    HydrawiseV2,
+    NotAuthorizedError,
+    ThrottledError,
+    dateStamp,
+    dateValue,
+    localizedNumber,
+    localizedUnit,
+    periodBounds,
+    type PeriodBounds,
+} from './lib/hydrawise-v2';
 
 const hydrawise_url = 'https://api.hydrawise.com';
 let nextpollSchedule: any = null;
@@ -13,7 +24,66 @@ let nextpollCustomer: any = null;
 let resetSwitch: any = null;
 const RELAYS: any = Object;
 
+/** How long an endpoint is paused after the API answered with 429, and the cap for repeated hits */
+const RATE_LIMIT_PAUSE = 5 * 60 * 1000;
+const RATE_LIMIT_PAUSE_MAX = 30 * 60 * 1000;
+
+/** Periods the water usage is reported for */
+type Period = 'today' | 'yesterday' | 'week' | 'month' | 'year';
+
+/** Total volume through the flow meters of a controller for one period */
+interface FlowSummary {
+    hasFlowSensor: boolean;
+    total: number;
+    unit: string;
+}
+
+/** One request of the rotating long term queries */
+interface PeriodTask {
+    kind: 'flow' | 'report';
+    period: Period;
+}
+
+/**
+ * A field that takes arguments must not appear twice in one query, so every period needs
+ * its own request. They take turns instead of being fetched on every poll.
+ */
+const V2_PERIOD_TASKS: PeriodTask[] = [
+    { kind: 'flow', period: 'yesterday' },
+    { kind: 'report', period: 'yesterday' },
+    { kind: 'flow', period: 'week' },
+    { kind: 'flow', period: 'month' },
+    { kind: 'flow', period: 'year' },
+];
+
+/** Zones of a controller, indexed by their (internal) zone id */
+interface ZoneSummary {
+    byId: Map<number, string>;
+    anyRunning: boolean;
+}
+
+/** Water usage of one reporting period, taken from the watering report */
+interface UsageSummary {
+    active: number;
+    runtime: number;
+    unit: string;
+    byZone: Map<number, { water: number; runtime: number; last: any; latest: any }>;
+}
+
 class Hydrawise extends utils.Adapter {
+    private v2: HydrawiseV2 | null = null;
+    private v2Timer: any = null;
+    private v2ControllerId: number | null = null;
+    private v2Objects = new Set<string>();
+    private v2Errors: Record<string, number> = {};
+    private v2Period = 0;
+    private v2FirstPoll = true;
+    private lastErrorCode: any = 0;
+    private unloaded = false;
+    private blockedUntil: Record<string, number> = {};
+    private backoff: Record<string, number> = {};
+    private pollIntervalWarned = false;
+
     public constructor(options: Partial<utils.AdapterOptions> = {}) {
         super({
             ...options,
@@ -26,38 +96,53 @@ class Hydrawise extends utils.Adapter {
     }
 
     private async onReady(): Promise<void> {
+        void this.setStateChangedAsync('info.connection', false, true);
+
         if (!this.config.apiKey) {
             this.log.error('No API-Key defined!');
         } else {
-            void this.setStateChangedAsync('info.connection', false, true);
+            const scheduleInterval = Math.max(15, Number(this.config.apiInterval) || 60) * 1000;
+            const customerInterval = Math.max(5, Number(this.config.customerInterval) || 30) * 60 * 1000;
 
             try {
                 await this.GetStatusSchedule();
-
-                nextpollSchedule = this.setInterval(async () => {
-                    await this.GetStatusSchedule();
-                }, this.config.apiInterval * 1000);
-
                 await this.GetCustomerDetails();
-
-                nextpollCustomer = this.setInterval(
-                    async () => {
-                        await this.GetCustomerDetails();
-                    },
-                    5 * 60 * 1000,
-                );
             } catch (error: any) {
                 this.log.error(error.toString());
             }
 
-            await this.subscribeStatesAsync('*');
+            // one stable interval per endpoint - a failing request must never remove it,
+            // the rate limit is handled by pausing the endpoint instead
+            nextpollSchedule = this.setInterval(() => {
+                void this.GetStatusSchedule();
+            }, scheduleInterval);
+
+            nextpollCustomer = this.setInterval(() => {
+                void this.GetCustomerDetails();
+            }, customerInterval);
         }
+
+        if (this.config.useV2) {
+            await this.startV2();
+        }
+
+        await this.subscribeStatesAsync('*');
     }
 
     private async GetStatusSchedule(): Promise<void> {
-        return new Promise((resolve, reject) => {
+        if (!this.mayRequest('statusschedule.php')) {
+            return;
+        }
+
+        return new Promise(resolve => {
             this.buildRequest('statusschedule.php', { api_key: this.config.apiKey })
                 .then(async response => {
+                    if (this.unloaded) {
+                        resolve();
+
+                        return;
+                    }
+
                     if (response?.status === 200) {
                         const content = response.data;
 
@@ -174,7 +259,13 @@ class Hydrawise extends utils.Adapter {
                             }
                         }
 
+                        this.checkPollInterval(Number(content.nextpoll));
+
                         for (const relay of content.relays) {
+                            if (this.unloaded) {
+                                break;
+                            }
+
                             const name = relay.relay;
                             await this.setObjectNotExistsAsync(`schedule.${relay.relay}`, {
                                 type: 'channel',
@@ -308,6 +399,10 @@ class Hydrawise extends utils.Adapter {
                         }
 
                         for (const sensor of content.sensors) {
+                            if (this.unloaded) {
+                                break;
+                            }
+
                             await this.setObjectNotExistsAsync(`schedule.sensors.${sensor.input}`, {
                                 type: 'channel',
                                 common: {
@@ -342,35 +437,30 @@ class Hydrawise extends utils.Adapter {
                         }
                     }
 
-                    resolve(response.status);
+                    resolve();
                 })
                 .catch(error => {
-                    this.clearInterval(nextpollSchedule);
+                    this.handleRequestError('statusschedule.php', error);
 
-                    if (
-                        error.code === 'EAI_AGAIN' ||
-                        error.code === 'ECONNABORTED' ||
-                        error.code === 'ENOTFOUND' ||
-                        error.response?.status === 429
-                    ) {
-                        nextpollSchedule = this.setInterval(async () => {
-                            await this.GetStatusSchedule();
-                        }, this.config.apiInterval * 1000);
-                    } else {
-                        this.log.debug(`(stats) received error - API is now offline: ${JSON.stringify(error)}`);
-
-                        void this.setStateChangedAsync('info.connection', false, true);
-
-                        reject(new Error(error));
-                    }
+                    resolve();
                 });
         });
     }
 
     private async GetCustomerDetails(): Promise<void> {
-        return new Promise((resolve, reject) => {
+        if (!this.mayRequest('customerdetails.php')) {
+            return;
+        }
+
+        return new Promise(resolve => {
             this.buildRequest('customerdetails.php', { api_key: this.config.apiKey })
                 .then(async response => {
+                    if (this.unloaded) {
+                        resolve();
+
+                        return;
+                    }
+
                     if (response?.status === 200) {
                         const content = response.data;
 
@@ -397,6 +487,10 @@ class Hydrawise extends utils.Adapter {
                         }
 
                         for (const controller of content.controllers) {
+                            if (this.unloaded) {
+                                break;
+                            }
+
                             await this.setObjectNotExistsAsync(`customer.controllers.${controller.name}`, {
                                 type: 'channel',
                                 common: {
@@ -421,8 +515,15 @@ class Hydrawise extends utils.Adapter {
                                 });
 
                                 if (key === 'last_contact') {
-                                    const t = new Date(controller[key] * 1000);
-                                    controller[key] = t.toString();
+                                    // most controllers report epoch seconds here, but the API also
+                                    // answers with plain text like "Unknown" - which used to end up
+                                    // in the state as "Invalid Date"
+                                    const timestamp = Number(controller[key]);
+
+                                    controller[key] =
+                                        Number.isFinite(timestamp) && timestamp > 0
+                                            ? new Date(timestamp * 1000).toString()
+                                            : String(controller[key] ?? '');
                                 }
 
                                 void this.setStateChangedAsync(
@@ -434,30 +535,12 @@ class Hydrawise extends utils.Adapter {
                         }
                     }
 
-                    resolve(response.status);
+                    resolve();
                 })
                 .catch(error => {
-                    this.clearInterval(nextpollCustomer);
+                    this.handleRequestError('customerdetails.php', error);
 
-                    if (
-                        error.code === 'EAI_AGAIN' ||
-                        error.code === 'ECONNABORTED' ||
-                        error.code === 'ENOTFOUND' ||
-                        error.response?.status === 429
-                    ) {
-                        nextpollCustomer = this.setInterval(
-                            async () => {
-                                await this.GetCustomerDetails();
-                            },
-                            5 * 60 * 1000,
-                        );
-                    } else {
-                        this.log.debug(`(stats) received error - API is now offline: ${JSON.stringify(error)}`);
-
-                        void this.setStateChangedAsync('info.connection', false, true);
-
-                        reject(new Error(error));
-                    }
+                    resolve();
                 });
         });
     }
@@ -465,7 +548,6 @@ class Hydrawise extends utils.Adapter {
     buildRequest(service: string, params: any): Promise<any> {
         return new Promise((resolve, reject) => {
             const url = `/api/v1/${service}`;
-            let lastErrorCode = 0;
 
             if (params.api_key) {
                 try {
@@ -479,7 +561,9 @@ class Hydrawise extends utils.Adapter {
                     })
                         .then(response => {
                             // no error - clear up reminder
-                            lastErrorCode = 0;
+                            this.lastErrorCode = 0;
+                            this.backoff[service] = 0;
+                            this.blockedUntil[service] = 0;
 
                             resolve(response);
                         })
@@ -496,21 +580,21 @@ class Hydrawise extends utils.Adapter {
                                 // http.ClientRequest in node.js
 
                                 // avoid spamming of the same error when stuck in a reconnection loop
-                                if (error.code === lastErrorCode) {
+                                if (error.code === this.lastErrorCode) {
                                     this.log.debug(error.message);
                                 } else {
                                     this.log.info(`error ${error.code} from ${url}: ${error.message}`);
-                                    lastErrorCode = error.code;
+                                    this.lastErrorCode = error.code;
                                 }
                             } else {
                                 // Something happened in setting up the request that triggered an Error
                                 this.log.error(error.message);
                             }
 
-                            reject(new Error(error));
+                            reject(error instanceof Error ? error : new Error(String(error)));
                         });
                 } catch (error: any) {
-                    reject(new Error(error));
+                    reject(error instanceof Error ? error : new Error(String(error)));
                 }
             } else {
                 reject(new Error('API key is not configured'));
@@ -525,8 +609,11 @@ class Hydrawise extends utils.Adapter {
      */
     private onUnload(callback: () => void): void {
         try {
+            this.unloaded = true;
+
             this.clearInterval(nextpollSchedule);
             this.clearInterval(nextpollCustomer);
+            this.clearInterval(this.v2Timer);
 
             callback();
         } catch {
@@ -627,6 +714,851 @@ class Hydrawise extends utils.Adapter {
                 void this.setState(`${relay[1]}stopZone`, true, false);
             }
         }
+    }
+
+    /**
+     * False while an endpoint is paused after the API answered with 429.
+     *
+     * @param service endpoint of the v1 API
+     */
+    private mayRequest(service: string): boolean {
+        const blocked = this.blockedUntil[service] || 0;
+
+        if (Date.now() < blocked) {
+            this.log.debug(`skipping ${service}, paused until ${new Date(blocked).toLocaleTimeString()}`);
+
+            return false;
+        }
+
+        return true;
+    }
+
+    /**
+     * Applies a failed request to the rate limit and to the connection state.
+     *
+     * @param service endpoint of the v1 API
+     * @param error the error the request failed with
+     */
+    private handleRequestError(service: string, error: any): void {
+        if (error?.response?.status === 429) {
+            // being rate limited does not mean the API is unreachable - back off and keep
+            // the connection state, otherwise a restart burst looks like an outage
+            const pause = Math.min(Math.max((this.backoff[service] || 0) * 2, RATE_LIMIT_PAUSE), RATE_LIMIT_PAUSE_MAX);
+
+            this.backoff[service] = pause;
+            this.blockedUntil[service] = Date.now() + pause;
+
+            this.log.info(`${service} hit the API rate limit - pausing it for ${Math.round(pause / 60000)} minutes`);
+
+            return;
+        }
+
+        this.log.debug(`(${service}) received error - API is now offline: ${error?.message ?? JSON.stringify(error)}`);
+
+        void this.setStateChangedAsync('info.connection', false, true);
+    }
+
+    /**
+     * The API reports how often it wants to be polled - warn once when we are faster.
+     *
+     * @param nextpoll seconds the API asks us to wait
+     */
+    private checkPollInterval(nextpoll: number): void {
+        if (!nextpoll || this.pollIntervalWarned || Number(this.config.apiInterval) >= nextpoll) {
+            return;
+        }
+
+        this.pollIntervalWarned = true;
+
+        this.log.warn(
+            `the API asks to be polled every ${nextpoll} seconds, but the configured interval is ${this.config.apiInterval} seconds`,
+        );
+    }
+
+    /* ------------------------------------------------------------------ *
+     *  Hydrawise v2 API (OAuth2 + GraphQL)                               *
+     *                                                                    *
+     *  The v1 REST API only reports the sensor configuration. Water       *
+     *  usage, sensor states, per zone reports and rainfall observations   *
+     *  are only available through the v2 API the Hydrawise app uses.      *
+     * ------------------------------------------------------------------ */
+
+    /** Creates the v2 client and starts its polling timer */
+    private async startV2(): Promise<void> {
+        if (!this.config.email || !this.config.password) {
+            this.log.error('The v2 API is enabled but no e-mail/password is configured!');
+            return;
+        }
+
+        this.v2 = new HydrawiseV2(this.config.email, this.config.password, {
+            debug: message => this.log.debug(`(v2) ${message}`),
+            info: message => this.log.info(`(v2) ${message}`),
+            warn: message => this.log.warn(`(v2) ${message}`),
+            error: message => this.log.error(`(v2) ${message}`),
+        });
+
+        await this.setObjectNotExistsAsync('info.connectionV2', {
+            type: 'state',
+            common: {
+                name: {
+                    en: 'v2 API connected',
+                    de: 'v2-API verbunden',
+                    ru: 'v2 API подключен',
+                    pt: 'API v2 conectada',
+                    nl: 'v2 API verbonden',
+                    fr: 'API v2 connectée',
+                    it: 'API v2 connessa',
+                    es: 'API v2 conectada',
+                    pl: 'API v2 połączone',
+                    uk: 'API v2 підключено',
+                    'zh-cn': 'v2 API 已连接',
+                },
+                type: 'boolean',
+                role: 'indicator.connected',
+                read: true,
+                write: false,
+                def: false,
+            },
+            native: {},
+        });
+
+        void this.setStateChangedAsync('info.connectionV2', false, true);
+
+        const minutes = Math.max(2, Number(this.config.v2Interval) || 5);
+
+        await this.pollV2();
+
+        this.v2Timer = this.setInterval(
+            () => {
+                void this.pollV2();
+            },
+            minutes * 60 * 1000,
+        );
+
+        this.log.info(`v2 API enabled - polling every ${minutes} minutes`);
+    }
+
+    /**
+     * Stops polling the v2 API, e.g. after the credentials turned out to be wrong
+     *
+     * @param reason why polling was stopped, ends up in the log
+     */
+    private stopV2(reason: string): void {
+        this.clearInterval(this.v2Timer);
+        this.v2Timer = null;
+        this.v2 = null;
+
+        void this.setStateChangedAsync('info.connectionV2', false, true);
+
+        this.log.error(`(v2) polling stopped: ${reason}`);
+    }
+
+    /** One poll cycle - every query is applied on its own so a single failure is not fatal */
+    private async pollV2(): Promise<void> {
+        if (!this.v2 || this.unloaded) {
+            return;
+        }
+
+        try {
+            const controllerId = await this.resolveV2Controller();
+
+            if (controllerId === null) {
+                return;
+            }
+
+            const bounds = periodBounds();
+
+            const snapshot = await this.v2Section('snapshot', () => this.v2!.getSnapshot(controllerId));
+            let zones: ZoneSummary | null = null;
+
+            if (snapshot) {
+                await this.applyV2Status(snapshot);
+
+                if (this.config.v2Weather) {
+                    await this.applyV2Observations(snapshot.observationsSummary);
+                }
+
+                await this.applyV2Sensors(snapshot.sensors || []);
+
+                zones = await this.applyV2Zones(snapshot.zones || []);
+            }
+
+            // the values of the current day are refreshed on every poll
+            const flow = await this.v2Section('flow today', () =>
+                this.v2!.getFlowSummary(controllerId, bounds.todayStart, bounds.now),
+            );
+            const report = await this.v2Section('report today', () =>
+                this.v2!.getReport(controllerId, bounds.todayStart, bounds.now),
+            );
+
+            const volume = flow ? this.sumFlow(flow) : null;
+            const usage = report ? this.summarizeRuns(report) : null;
+
+            await this.applyV2Usage('today', volume, usage);
+            await this.applyV2ZoneUsage(zones, usage, volume?.unit || 'l');
+            await this.applyV2Leak(volume, usage, zones);
+
+            // the longer periods take turns, one request per poll
+            await this.pollV2Periods(controllerId, bounds);
+
+            if (snapshot || flow || report) {
+                void this.setStateChangedAsync('info.connectionV2', true, true);
+
+                await this.setV2State(
+                    'water.lastUpdate',
+                    { name: 'last v2 update', type: 'string', role: 'date' },
+                    new Date().toISOString(),
+                );
+            }
+        } catch (error: any) {
+            if (error instanceof NotAuthorizedError) {
+                this.stopV2(`login failed - check e-mail and password (${error.message})`);
+                return;
+            }
+
+            void this.setStateChangedAsync('info.connectionV2', false, true);
+
+            this.log.warn(`(v2) poll failed: ${error.message}`);
+        }
+    }
+
+    /**
+     * Yesterday, week, month and year in turn. A parameterized field must not appear twice
+     * in one query, so each period needs its own request - fetching them all on every poll
+     * would be wasteful, but the first poll fills them all in once.
+     *
+     * @param controllerId the controller to query
+     * @param bounds start/end of the reporting periods
+     */
+    private async pollV2Periods(controllerId: number, bounds: PeriodBounds): Promise<void> {
+        const tasks = this.v2FirstPoll ? V2_PERIOD_TASKS : [V2_PERIOD_TASKS[this.v2Period++ % V2_PERIOD_TASKS.length]];
+
+        this.v2FirstPoll = false;
+
+        for (const task of tasks) {
+            if (this.unloaded) {
+                return;
+            }
+
+            const [from, until] = this.periodRange(task.period, bounds);
+
+            if (task.kind === 'flow') {
+                const sensors = await this.v2Section(`flow ${task.period}`, () =>
+                    this.v2!.getFlowSummary(controllerId, from, until),
+                );
+
+                if (sensors) {
+                    const volume = this.sumFlow(sensors);
+
+                    if (volume.hasFlowSensor) {
+                        await this.setV2State(
+                            `water.${task.period}`,
+                            { name: `water usage ${task.period}`, unit: volume.unit },
+                            volume.total,
+                        );
+                    }
+                }
+            } else {
+                const entries = await this.v2Section(`report ${task.period}`, () =>
+                    this.v2!.getReport(controllerId, from, until),
+                );
+
+                if (entries) {
+                    await this.applyV2Usage(task.period, null, this.summarizeRuns(entries));
+                }
+            }
+        }
+    }
+
+    /**
+     * Start and end of a reporting period.
+     *
+     * @param period the period to look up
+     * @param bounds start/end of the reporting periods
+     */
+    private periodRange(period: Period, bounds: PeriodBounds): [number, number] {
+        switch (period) {
+            case 'yesterday':
+                return [bounds.ydayStart, bounds.ydayEnd];
+            case 'week':
+                return [bounds.weekStart, bounds.now];
+            case 'month':
+                return [bounds.monthStart, bounds.now];
+            case 'year':
+                return [bounds.yearStart, bounds.now];
+            default:
+                return [bounds.todayStart, bounds.now];
+        }
+    }
+
+    /**
+     * Runs one query and keeps the adapter alive when only this query fails
+     *
+     * @param name label of the query, used in the warning when it fails
+     * @param run the query to run
+     */
+    private async v2Section<T>(name: string, run: () => Promise<T>): Promise<T | null> {
+        try {
+            const result = await run();
+
+            this.v2Errors[name] = 0;
+
+            return result;
+        } catch (error: any) {
+            if (error instanceof NotAuthorizedError) {
+                throw error;
+            }
+
+            const count = (this.v2Errors[name] = (this.v2Errors[name] || 0) + 1);
+
+            if (error instanceof ThrottledError) {
+                this.log.debug(`(v2) ${error.message}`);
+            } else if (count <= 3) {
+                this.log.warn(`(v2) query "${name}" failed: ${error.message}`);
+            } else {
+                this.log.debug(`(v2) query "${name}" failed (${count}x): ${error.message}`);
+            }
+
+            return null;
+        }
+    }
+
+    /** Id of the controller to query - configured explicitly or the first one of the account */
+    private async resolveV2Controller(): Promise<number | null> {
+        if (this.v2ControllerId !== null) {
+            return this.v2ControllerId;
+        }
+
+        if (Number(this.config.v2ControllerId) > 0) {
+            this.v2ControllerId = Number(this.config.v2ControllerId);
+
+            return this.v2ControllerId;
+        }
+
+        const controllers = await this.v2!.getControllers();
+
+        if (!controllers.length) {
+            this.log.error('(v2) no controller found for this account');
+
+            return null;
+        }
+
+        this.v2ControllerId = controllers[0].id;
+
+        this.log.info(`(v2) using controller "${controllers[0].name}" (id ${controllers[0].id})`);
+
+        return this.v2ControllerId;
+    }
+
+    private async applyV2Status(controller: any): Promise<void> {
+        await this.ensureV2Channel('controller', 'Controller');
+
+        const status = controller.status || {};
+        const hardware = controller.hardware || {};
+
+        await this.setV2State(
+            'controller.online',
+            { name: 'controller online', type: 'boolean', role: 'indicator.reachable' },
+            !!(controller.online ?? status.online),
+        );
+        await this.setV2State(
+            'controller.status',
+            { name: 'status summary', type: 'string', role: 'text' },
+            status.summary ?? null,
+        );
+        await this.setV2State(
+            'controller.lastContact',
+            { name: 'last contact', type: 'string', role: 'date' },
+            dateValue(status.lastContact) ?? dateValue(controller.lastContactTime),
+        );
+        await this.setV2State(
+            'controller.name',
+            { name: 'controller name', type: 'string', role: 'text' },
+            controller.name ?? null,
+        );
+        await this.setV2State(
+            'controller.model',
+            { name: 'controller model', type: 'string', role: 'text' },
+            hardware.model?.name ?? null,
+        );
+        await this.setV2State(
+            'controller.serialNumber',
+            { name: 'serial number', type: 'string', role: 'text' },
+            hardware.serialNumber ?? null,
+        );
+        await this.setV2State(
+            'controller.firmwareVersion',
+            { name: 'firmware version', type: 'string', role: 'text' },
+            hardware.version ?? null,
+        );
+        await this.setV2State(
+            'controller.waterSavings',
+            { name: 'accumulated water savings', unit: '%' },
+            status.accumulatedWaterSavings ?? null,
+        );
+    }
+
+    private async applyV2Observations(observations: any): Promise<void> {
+        if (!observations) {
+            return;
+        }
+
+        await this.ensureV2Channel('weather', 'Weather station');
+
+        await this.setV2State(
+            'weather.rainfallLast24h',
+            {
+                name: 'rainfall last 24 hours',
+                role: 'value.precipitation',
+                unit: localizedUnit(observations.rainfallLast24Hours, 'mm'),
+            },
+            localizedNumber(observations.rainfallLast24Hours) ?? undefined,
+        );
+        await this.setV2State(
+            'weather.rainfallLast7d',
+            {
+                name: 'rainfall last 7 days',
+                role: 'value.precipitation',
+                unit: localizedUnit(observations.rainfallLast168hours, 'mm'),
+            },
+            localizedNumber(observations.rainfallLast168hours) ?? undefined,
+        );
+        await this.setV2State(
+            'weather.temperature',
+            {
+                name: 'current temperature',
+                role: 'value.temperature',
+                unit: localizedUnit(observations.currentTemperature, '°C'),
+            },
+            localizedNumber(observations.currentTemperature) ?? undefined,
+        );
+        await this.setV2State(
+            'weather.temperatureMax',
+            {
+                name: 'max temperature since midnight',
+                role: 'value.temperature',
+                unit: localizedUnit(observations.maxTemperatureSinceMidnight, '°C'),
+            },
+            localizedNumber(observations.maxTemperatureSinceMidnight) ?? undefined,
+        );
+    }
+
+    private async applyV2Sensors(sensors: any[]): Promise<void> {
+        if (!sensors.length) {
+            return;
+        }
+
+        await this.ensureV2Channel('sensors', 'Sensors');
+
+        for (const sensor of sensors) {
+            const input = sensor?.input?.number;
+
+            if (input === undefined || input === null) {
+                continue;
+            }
+
+            const base = `sensors.${this.name2id(String(input))}`;
+
+            await this.ensureV2Channel(base, sensor.name || `sensor ${input}`);
+
+            await this.setV2State(
+                `${base}.name`,
+                { name: 'sensor name', type: 'string', role: 'text' },
+                sensor.name ?? null,
+            );
+            await this.setV2State(
+                `${base}.type`,
+                { name: 'sensor type', type: 'string', role: 'text' },
+                sensor.model?.sensorType ?? null,
+            );
+            await this.setV2State(
+                `${base}.model`,
+                { name: 'sensor model', type: 'string', role: 'text' },
+                sensor.model?.name ?? null,
+            );
+            await this.setV2State(
+                `${base}.terminal`,
+                { name: 'controller terminal', type: 'string', role: 'text' },
+                sensor.input?.label ?? null,
+            );
+
+            // a level sensor (rain, moisture) reports whether it is currently triggered,
+            // a flow meter leaves this null
+            if (sensor.status?.active !== null && sensor.status?.active !== undefined) {
+                await this.setV2State(
+                    `${base}.active`,
+                    { name: 'sensor is triggered', type: 'boolean', role: 'indicator' },
+                    !!sensor.status.active,
+                );
+            }
+
+            if (sensor.status?.waterFlow) {
+                await this.setV2State(
+                    `${base}.waterFlow`,
+                    {
+                        name: 'water flow reported by the sensor',
+                        unit: localizedUnit(sensor.status.waterFlow),
+                    },
+                    localizedNumber(sensor.status.waterFlow, 0),
+                );
+            }
+        }
+    }
+
+    private async applyV2Zones(zones: any[]): Promise<ZoneSummary> {
+        const summary: ZoneSummary = { byId: new Map(), anyRunning: false };
+
+        if (!zones.length) {
+            return summary;
+        }
+
+        await this.ensureV2Channel('zones', 'Zones');
+
+        for (const zone of zones) {
+            const number = zone?.number?.value ?? zone?.id;
+
+            if (number === undefined || number === null) {
+                continue;
+            }
+
+            const base = `zones.${this.name2id(String(number))}`;
+            const runs = zone.scheduledRuns || {};
+            const current = runs.currentRun;
+            const running = !!current;
+
+            summary.byId.set(zone.id, base);
+            summary.anyRunning = summary.anyRunning || running;
+
+            await this.ensureV2Channel(base, zone.name || `zone ${number}`);
+
+            await this.setV2State(`${base}.id`, { name: 'zone id' }, zone.id);
+            await this.setV2State(
+                `${base}.name`,
+                { name: 'zone name', type: 'string', role: 'text' },
+                zone.name ?? null,
+            );
+            await this.setV2State(
+                `${base}.running`,
+                { name: 'zone is watering', type: 'boolean', role: 'indicator.working' },
+                running,
+            );
+            await this.setV2State(
+                `${base}.status`,
+                { name: 'run status', type: 'string', role: 'text' },
+                runs.status ?? null,
+            );
+            await this.setV2State(
+                `${base}.remainingTime`,
+                { name: 'remaining run time', unit: 's' },
+                running ? Number(current.remainingTime) || 0 : 0,
+            );
+            await this.setV2State(
+                `${base}.currentWater`,
+                { name: 'water used by the running zone', unit: localizedUnit(runs.currentWaterUsage, 'l') },
+                running ? localizedNumber(runs.currentWaterUsage, 0) : 0,
+            );
+            await this.setV2State(
+                `${base}.nextRun`,
+                { name: 'next run', type: 'string', role: 'date' },
+                dateValue(runs.nextRun?.startTime),
+            );
+            await this.setV2State(
+                `${base}.nextRunDuration`,
+                { name: 'duration of the next run', unit: 'min' },
+                runs.nextRun?.duration ?? null,
+            );
+            await this.setV2State(
+                `${base}.suspendedUntil`,
+                { name: 'suspended until', type: 'string', role: 'date' },
+                dateValue(zone.status?.suspendedUntil),
+            );
+            await this.setV2State(
+                `${base}.waterBalance`,
+                { name: 'relative water balance', unit: '%' },
+                zone.status?.relativeWaterBalance ?? null,
+            );
+        }
+
+        return summary;
+    }
+
+    /**
+     * Adds up the flow meters of a controller.
+     *
+     * @param sensors sensors as returned by a flow summary query
+     */
+    private sumFlow(sensors: any[]): FlowSummary {
+        const summary: FlowSummary = { hasFlowSensor: false, total: 0, unit: '' };
+
+        for (const sensor of sensors) {
+            if (sensor?.model?.sensorType !== 'FLOW') {
+                continue;
+            }
+
+            const volume = sensor.flowSummary?.totalWaterVolume;
+
+            summary.hasFlowSensor = true;
+            // the API answers with null when nothing flowed in that period
+            summary.total += localizedNumber(volume, 0) as number;
+            summary.unit = summary.unit || localizedUnit(volume);
+        }
+
+        summary.total = Math.round(summary.total * 100) / 100;
+
+        return summary;
+    }
+
+    /**
+     * Adds up the runs of a watering report, per controller and per zone.
+     *
+     * @param entries entries of the watering report
+     */
+    private summarizeRuns(entries: any[]): UsageSummary {
+        const summary: UsageSummary = { active: 0, runtime: 0, unit: '', byZone: new Map() };
+
+        for (const entry of entries) {
+            const run = entry?.runEvent;
+
+            if (!run?.zone) {
+                continue;
+            }
+
+            const zone = summary.byZone.get(run.zone.id) || { water: 0, runtime: 0, last: null, latest: null };
+
+            // entries without a reported start were scheduled but did not run - they still
+            // carry the reason (rain sensor, suspension), which is worth keeping
+            if (!zone.latest || dateStamp(run.scheduledStartTime) >= dateStamp(zone.latest.scheduledStartTime)) {
+                zone.latest = run;
+            }
+
+            if (run.reportedStartTime) {
+                const water = localizedNumber(run.reportedWaterUsage, 0) as number;
+                const runtime = Number(run.reportedDuration) || 0;
+
+                summary.active += water;
+                summary.runtime += runtime;
+                summary.unit = summary.unit || localizedUnit(run.reportedWaterUsage);
+
+                zone.water += water;
+                zone.runtime += runtime;
+
+                if (!zone.last || dateStamp(run.reportedEndTime) >= dateStamp(zone.last.reportedEndTime)) {
+                    zone.last = run;
+                }
+            }
+
+            summary.byZone.set(run.zone.id, zone);
+        }
+
+        summary.active = Math.round(summary.active * 100) / 100;
+
+        return summary;
+    }
+
+    /**
+     * Water usage of one period.
+     *
+     * @param period the period these numbers belong to
+     * @param volume total volume through the flow meters, null when it was not queried
+     * @param usage watering report of the period, null when it was not queried
+     */
+    private async applyV2Usage(period: Period, volume: FlowSummary | null, usage: UsageSummary | null): Promise<void> {
+        if (!volume && !usage) {
+            return;
+        }
+
+        await this.ensureV2Channel('water', 'Water usage');
+
+        const unit = volume?.unit || usage?.unit || 'l';
+
+        if (volume?.hasFlowSensor) {
+            await this.setV2State(`water.${period}`, { name: `water usage ${period}`, unit }, volume.total);
+        }
+
+        if (!usage) {
+            return;
+        }
+
+        await this.setV2State(
+            `water.${period}Active`,
+            { name: `water used for watering ${period}`, unit },
+            usage.active,
+        );
+        await this.setV2State(`water.${period}Runtime`, { name: `watering time ${period}`, unit: 's' }, usage.runtime);
+
+        if (volume?.hasFlowSensor) {
+            await this.setV2State(
+                `water.${period}Inactive`,
+                { name: `water used outside of watering ${period}`, unit },
+                this.inactiveVolume(volume, usage),
+            );
+        }
+    }
+
+    /**
+     * Water that flowed without a zone running. The watering report and the flow summary are
+     * not updated at the same time, so a negative difference only means the report is ahead.
+     *
+     * @param volume total volume through the flow meters
+     * @param usage watering report of the same period
+     */
+    private inactiveVolume(volume: FlowSummary, usage: UsageSummary): number {
+        return volume.total > usage.active ? Math.round((volume.total - usage.active) * 100) / 100 : 0;
+    }
+
+    /**
+     * Per zone water usage of the current day - zones without a run are reset to zero.
+     *
+     * @param zones zones of the controller
+     * @param today watering report of the current day
+     * @param unit volume unit reported by the API
+     */
+    private async applyV2ZoneUsage(zones: ZoneSummary | null, today: UsageSummary | null, unit: string): Promise<void> {
+        if (!zones || !today) {
+            return;
+        }
+
+        for (const [zoneId, base] of zones.byId) {
+            const usage = today.byZone.get(zoneId);
+
+            await this.setV2State(`${base}.waterToday`, { name: 'water used today', unit }, usage?.water ?? 0);
+            await this.setV2State(
+                `${base}.runtimeToday`,
+                { name: 'watering time today', unit: 's' },
+                usage?.runtime ?? 0,
+            );
+
+            if (usage?.latest) {
+                await this.setV2State(
+                    `${base}.scheduleStatus`,
+                    { name: 'status of the most recent scheduled run', type: 'string', role: 'text' },
+                    usage.latest.scheduledStatus?.label ?? null,
+                );
+            }
+
+            const last = usage?.last;
+
+            if (!last) {
+                continue;
+            }
+
+            await this.setV2State(
+                `${base}.lastRunStart`,
+                { name: 'start of the last run', type: 'string', role: 'date' },
+                dateValue(last.reportedStartTime),
+            );
+            await this.setV2State(
+                `${base}.lastRunEnd`,
+                { name: 'end of the last run', type: 'string', role: 'date' },
+                dateValue(last.reportedEndTime),
+            );
+            await this.setV2State(
+                `${base}.lastRunDuration`,
+                { name: 'duration of the last run', unit: 's' },
+                Number(last.reportedDuration) || 0,
+            );
+            await this.setV2State(
+                `${base}.lastRunWater`,
+                { name: 'water used by the last run', unit },
+                localizedNumber(last.reportedWaterUsage, 0),
+            );
+            await this.setV2State(
+                `${base}.lastRunStatus`,
+                { name: 'status of the last run', type: 'string', role: 'text' },
+                last.reportedStatus?.label ?? null,
+            );
+            await this.setV2State(
+                `${base}.lastRunOk`,
+                { name: 'last run finished normally', type: 'boolean', role: 'indicator' },
+                last.reportedStopReason?.finishedNormally ?? null,
+            );
+        }
+    }
+
+    /**
+     * Water that flowed today without any zone running points at a leak or a dripping valve.
+     *
+     * @param volume total volume through the flow meters today
+     * @param usage watering report of the current day
+     * @param zones zones of the controller
+     */
+    private async applyV2Leak(
+        volume: FlowSummary | null,
+        usage: UsageSummary | null,
+        zones: ZoneSummary | null,
+    ): Promise<void> {
+        if (!volume?.hasFlowSensor || !usage) {
+            return;
+        }
+
+        // the report only records a run once it finished, so while a zone is watering the
+        // flow meter is ahead of it - that difference is not a leak. Keep the last verdict.
+        if (zones?.anyRunning) {
+            return;
+        }
+
+        const threshold = Number(this.config.leakThreshold) || 0;
+        const inactive = this.inactiveVolume(volume, usage);
+
+        await this.setV2State(
+            'water.leakSuspected',
+            { name: 'water used today without any zone running', type: 'boolean', role: 'indicator.alarm' },
+            threshold > 0 && inactive > threshold,
+        );
+    }
+
+    /**
+     * Creates a channel once per adapter run
+     *
+     * @param id id of the channel
+     * @param name display name of the channel
+     */
+    private async ensureV2Channel(id: string, name: string): Promise<void> {
+        if (this.v2Objects.has(`channel:${id}`) || this.unloaded) {
+            return;
+        }
+
+        await this.setObjectNotExistsAsync(id, { type: 'channel', common: { name }, native: {} });
+
+        this.v2Objects.add(`channel:${id}`);
+    }
+
+    /**
+     * Creates the state on first use (units are only known once the API answered) and writes its value
+     *
+     * @param id id of the state
+     * @param common common properties used when the state is created
+     * @param value value to write
+     */
+    private async setV2State(id: string, common: Partial<ioBroker.StateCommon>, value: any): Promise<void> {
+        if (value === undefined || this.unloaded) {
+            return;
+        }
+
+        if (!this.v2Objects.has(id)) {
+            const definition: ioBroker.StateCommon = {
+                name: id.split('.').pop() as string,
+                type: 'number',
+                role: 'value',
+                read: true,
+                write: false,
+                ...common,
+            };
+
+            const existing = await this.getObjectAsync(id);
+
+            if (!existing) {
+                await this.setObjectAsync(id, { type: 'state', common: definition, native: {} });
+            } else if (definition.unit && existing.common?.unit !== definition.unit) {
+                // the unit follows the account settings (litres/gallons) and is only known
+                // once the API answered - correct it, but leave the object alone otherwise
+                await this.extendObjectAsync(id, { common: { unit: definition.unit } });
+            }
+
+            this.v2Objects.add(id);
+        }
+
+        await this.setStateChangedAsync(id, value, true);
     }
 
     name2id(pName: string): string {
