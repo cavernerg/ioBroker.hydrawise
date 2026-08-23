@@ -33,9 +33,13 @@ __export(hydrawise_v2_exports, {
   ThrottledError: () => ThrottledError,
   dateStamp: () => dateStamp,
   dateValue: () => dateValue,
+  inactiveVolume: () => inactiveVolume,
   localizedNumber: () => localizedNumber,
   localizedUnit: () => localizedUnit,
-  periodBounds: () => periodBounds
+  periodBounds: () => periodBounds,
+  periodRange: () => periodRange,
+  sumFlow: () => sumFlow,
+  summarizeRuns: () => summarizeRuns
 });
 module.exports = __toCommonJS(hydrawise_v2_exports);
 var import_axios = __toESM(require("axios"));
@@ -204,7 +208,10 @@ class HydrawiseV2 {
       data: data.toString(),
       timeout: REQUEST_TIMEOUT,
       responseType: "json",
-      validateStatus: () => true
+      validateStatus: () => true,
+      // a 307/308 would replay the body - and with it the account password - to
+      // whatever host the redirect points at
+      maxRedirects: 0
     });
     const body = response.data || {};
     if (body.error || !body.access_token) {
@@ -212,6 +219,12 @@ class HydrawiseV2 {
         this.log.debug(`refreshing the v2 token failed (${JSON.stringify(body.error)}), logging in again`);
         this.refreshToken = null;
         return this.fetchToken(false);
+      }
+      if (response.status === 429) {
+        throw new ThrottledError("login: too many requests");
+      }
+      if (![400, 401, 403].includes(response.status) || !body.error) {
+        throw new Error(`login: HTTP ${response.status} ${String(body.message || body.error || "")}`.trim());
       }
       this.reset();
       throw new NotAuthorizedError(String(body.message || body.error || `HTTP ${response.status}`));
@@ -247,7 +260,8 @@ class HydrawiseV2 {
       data: { query, variables },
       timeout: REQUEST_TIMEOUT,
       responseType: "json",
-      validateStatus: () => true
+      validateStatus: () => true,
+      maxRedirects: 0
     });
   }
   /**
@@ -265,6 +279,10 @@ class HydrawiseV2 {
       this.token = null;
       await this.ensureToken();
       response = await this.post(query, variables);
+      if (response.status === 401) {
+        this.reset();
+        throw new NotAuthorizedError(`${name}: the account is not authorized for the v2 API`);
+      }
     }
     if (response.status === 429) {
       throw new ThrottledError(`${name}: too many requests`);
@@ -364,6 +382,71 @@ function dateStamp(date) {
   const parsed = Date.parse((_a = date == null ? void 0 : date.value) != null ? _a : "");
   return Number.isNaN(parsed) ? 0 : parsed;
 }
+function periodRange(period, bounds) {
+  switch (period) {
+    case "yesterday":
+      return [bounds.ydayStart, bounds.ydayEnd];
+    case "week":
+      return [bounds.weekStart, bounds.now];
+    case "month":
+      return [bounds.monthStart, bounds.now];
+    case "year":
+      return [bounds.yearStart, bounds.now];
+    default:
+      return [bounds.todayStart, bounds.now];
+  }
+}
+function sumFlow(sensors) {
+  var _a, _b;
+  const summary = { hasFlowSensor: false, hasValue: false, total: 0, unit: "" };
+  for (const sensor of sensors) {
+    if (((_a = sensor == null ? void 0 : sensor.model) == null ? void 0 : _a.sensorType) !== "FLOW") {
+      continue;
+    }
+    const volume = (_b = sensor.flowSummary) == null ? void 0 : _b.totalWaterVolume;
+    const reading = localizedNumber(volume);
+    summary.hasFlowSensor = true;
+    summary.hasValue = summary.hasValue || reading !== null;
+    summary.total += reading != null ? reading : 0;
+    summary.unit = summary.unit || localizedUnit(volume);
+  }
+  summary.total = Math.round(summary.total * 100) / 100;
+  return summary;
+}
+function summarizeRuns(entries) {
+  const summary = { active: 0, runtime: 0, unit: "", byZone: /* @__PURE__ */ new Map() };
+  for (const entry of entries) {
+    const run = entry == null ? void 0 : entry.runEvent;
+    if (!(run == null ? void 0 : run.zone)) {
+      continue;
+    }
+    const zone = summary.byZone.get(run.zone.id) || { water: 0, runtime: 0, last: null, latest: null };
+    if (!zone.latest || dateStamp(run.scheduledStartTime) >= dateStamp(zone.latest.scheduledStartTime)) {
+      zone.latest = run;
+    }
+    if (run.reportedStartTime) {
+      const water = localizedNumber(run.reportedWaterUsage, 0);
+      const runtime = Number(run.reportedDuration) || 0;
+      summary.active += water;
+      summary.runtime += runtime;
+      summary.unit = summary.unit || localizedUnit(run.reportedWaterUsage);
+      zone.water += water;
+      zone.runtime += runtime;
+      if (!zone.last || dateStamp(run.reportedEndTime) >= dateStamp(zone.last.reportedEndTime)) {
+        zone.last = run;
+      }
+    }
+    summary.byZone.set(run.zone.id, zone);
+  }
+  summary.active = Math.round(summary.active * 100) / 100;
+  for (const zone of summary.byZone.values()) {
+    zone.water = Math.round(zone.water * 100) / 100;
+  }
+  return summary;
+}
+function inactiveVolume(volume, usage) {
+  return volume.total > usage.active ? Math.round((volume.total - usage.active) * 100) / 100 : 0;
+}
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
   HydrawiseV2,
@@ -371,8 +454,12 @@ function dateStamp(date) {
   ThrottledError,
   dateStamp,
   dateValue,
+  inactiveVolume,
   localizedNumber,
   localizedUnit,
-  periodBounds
+  periodBounds,
+  periodRange,
+  sumFlow,
+  summarizeRuns
 });
 //# sourceMappingURL=hydrawise-v2.js.map

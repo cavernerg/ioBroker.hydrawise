@@ -32,11 +32,10 @@ const RELAYS = Object;
 const RATE_LIMIT_PAUSE = 5 * 60 * 1e3;
 const RATE_LIMIT_PAUSE_MAX = 30 * 60 * 1e3;
 const V2_PERIOD_TASKS = [
-  { kind: "flow", period: "yesterday" },
-  { kind: "report", period: "yesterday" },
-  { kind: "flow", period: "week" },
-  { kind: "flow", period: "month" },
-  { kind: "flow", period: "year" }
+  { period: "yesterday", withReport: true },
+  { period: "week", withReport: false },
+  { period: "month", withReport: false },
+  { period: "year", withReport: false }
 ];
 class Hydrawise extends utils.Adapter {
   v2 = null;
@@ -46,6 +45,10 @@ class Hydrawise extends utils.Adapter {
   v2Errors = {};
   v2Period = 0;
   v2FirstPoll = true;
+  v2Polling = false;
+  v2AnySection = false;
+  v2Units = {};
+  leakSeen = false;
   lastErrorCode = 0;
   unloaded = false;
   blockedUntil = {};
@@ -79,11 +82,11 @@ class Hydrawise extends utils.Adapter {
       nextpollCustomer = this.setInterval(() => {
         void this.GetCustomerDetails();
       }, customerInterval);
+      await this.subscribeStatesAsync("*");
     }
     if (this.config.useV2) {
       await this.startV2();
     }
-    await this.subscribeStatesAsync("*");
   }
   async GetStatusSchedule() {
     if (!this.mayRequest("statusschedule.php")) {
@@ -613,8 +616,8 @@ class Hydrawise extends utils.Adapter {
       this.log.info(`${service} hit the API rate limit - pausing it for ${Math.round(pause / 6e4)} minutes`);
       return;
     }
-    this.log.debug(`(${service}) received error - API is now offline: ${(_b = error == null ? void 0 : error.message) != null ? _b : JSON.stringify(error)}`);
-    void this.setStateChangedAsync("info.connection", false, true);
+    this.log.debug(`(${service}) received error - API is now offline: ${(_b = error == null ? void 0 : error.message) != null ? _b : String(error)}`);
+    this.writeFlag("info.connection", false);
   }
   /**
    * The API reports how often it wants to be polled - warn once when we are faster.
@@ -622,12 +625,13 @@ class Hydrawise extends utils.Adapter {
    * @param nextpoll seconds the API asks us to wait
    */
   checkPollInterval(nextpoll) {
-    if (!nextpoll || this.pollIntervalWarned || Number(this.config.apiInterval) >= nextpoll) {
+    const configured = Math.max(15, Number(this.config.apiInterval) || 60);
+    if (!nextpoll || this.pollIntervalWarned || configured >= nextpoll) {
       return;
     }
     this.pollIntervalWarned = true;
     this.log.warn(
-      `the API asks to be polled every ${nextpoll} seconds, but the configured interval is ${this.config.apiInterval} seconds`
+      `the API asks to be polled every ${nextpoll} seconds, but the adapter polls every ${configured} seconds`
     );
   }
   /* ------------------------------------------------------------------ *
@@ -649,33 +653,12 @@ class Hydrawise extends utils.Adapter {
       warn: (message) => this.log.warn(`(v2) ${message}`),
       error: (message) => this.log.error(`(v2) ${message}`)
     });
-    await this.setObjectNotExistsAsync("info.connectionV2", {
-      type: "state",
-      common: {
-        name: {
-          en: "v2 API connected",
-          de: "v2-API verbunden",
-          ru: "v2 API \u043F\u043E\u0434\u043A\u043B\u044E\u0447\u0435\u043D",
-          pt: "API v2 conectada",
-          nl: "v2 API verbonden",
-          fr: "API v2 connect\xE9e",
-          it: "API v2 connessa",
-          es: "API v2 conectada",
-          pl: "API v2 po\u0142\u0105czone",
-          uk: "API v2 \u043F\u0456\u0434\u043A\u043B\u044E\u0447\u0435\u043D\u043E",
-          "zh-cn": "v2 API \u5DF2\u8FDE\u63A5"
-        },
-        type: "boolean",
-        role: "indicator.connected",
-        read: true,
-        write: false,
-        def: false
-      },
-      native: {}
-    });
-    void this.setStateChangedAsync("info.connectionV2", false, true);
+    this.writeFlag("info.connectionV2", false);
     const minutes = Math.max(2, Number(this.config.v2Interval) || 5);
     await this.pollV2();
+    if (!this.v2) {
+      return;
+    }
     this.v2Timer = this.setInterval(
       () => {
         void this.pollV2();
@@ -693,14 +676,16 @@ class Hydrawise extends utils.Adapter {
     this.clearInterval(this.v2Timer);
     this.v2Timer = null;
     this.v2 = null;
-    void this.setStateChangedAsync("info.connectionV2", false, true);
+    this.writeFlag("info.connectionV2", false);
     this.log.error(`(v2) polling stopped: ${reason}`);
   }
   /** One poll cycle - every query is applied on its own so a single failure is not fatal */
   async pollV2() {
-    if (!this.v2 || this.unloaded) {
+    if (!this.v2 || this.unloaded || this.v2Polling) {
       return;
     }
+    this.v2Polling = true;
+    this.v2AnySection = false;
     try {
       const controllerId = await this.resolveV2Controller();
       if (controllerId === null) {
@@ -725,27 +710,31 @@ class Hydrawise extends utils.Adapter {
         "report today",
         () => this.v2.getReport(controllerId, bounds.todayStart, bounds.now)
       );
-      const volume = flow ? this.sumFlow(flow) : null;
-      const usage = report ? this.summarizeRuns(report) : null;
+      const volume = flow ? (0, import_hydrawise_v2.sumFlow)(flow) : null;
+      const usage = report ? (0, import_hydrawise_v2.summarizeRuns)(report) : null;
       await this.applyV2Usage("today", volume, usage);
-      await this.applyV2ZoneUsage(zones, usage, (volume == null ? void 0 : volume.unit) || "l");
+      await this.applyV2ZoneUsage(zones, usage, (usage == null ? void 0 : usage.unit) || (volume == null ? void 0 : volume.unit) || "l");
       await this.applyV2Leak(volume, usage, zones);
       await this.pollV2Periods(controllerId, bounds);
-      if (snapshot || flow || report) {
-        void this.setStateChangedAsync("info.connectionV2", true, true);
+      this.writeFlag("info.connectionV2", this.v2AnySection);
+      if (this.v2AnySection) {
         await this.setV2State(
           "water.lastUpdate",
           { name: "last v2 update", type: "string", role: "date" },
           (/* @__PURE__ */ new Date()).toISOString()
         );
+      } else {
+        this.log.debug("(v2) no query of this poll returned data");
       }
     } catch (error) {
       if (error instanceof import_hydrawise_v2.NotAuthorizedError) {
         this.stopV2(`login failed - check e-mail and password (${error.message})`);
         return;
       }
-      void this.setStateChangedAsync("info.connectionV2", false, true);
+      this.writeFlag("info.connectionV2", false);
       this.log.warn(`(v2) poll failed: ${error.message}`);
+    } finally {
+      this.v2Polling = false;
     }
   }
   /**
@@ -763,51 +752,17 @@ class Hydrawise extends utils.Adapter {
       if (this.unloaded) {
         return;
       }
-      const [from, until] = this.periodRange(task.period, bounds);
-      if (task.kind === "flow") {
-        const sensors = await this.v2Section(
-          `flow ${task.period}`,
-          () => this.v2.getFlowSummary(controllerId, from, until)
-        );
-        if (sensors) {
-          const volume = this.sumFlow(sensors);
-          if (volume.hasFlowSensor) {
-            await this.setV2State(
-              `water.${task.period}`,
-              { name: `water usage ${task.period}`, unit: volume.unit },
-              volume.total
-            );
-          }
-        }
-      } else {
-        const entries = await this.v2Section(
-          `report ${task.period}`,
-          () => this.v2.getReport(controllerId, from, until)
-        );
-        if (entries) {
-          await this.applyV2Usage(task.period, null, this.summarizeRuns(entries));
-        }
-      }
-    }
-  }
-  /**
-   * Start and end of a reporting period.
-   *
-   * @param period the period to look up
-   * @param bounds start/end of the reporting periods
-   */
-  periodRange(period, bounds) {
-    switch (period) {
-      case "yesterday":
-        return [bounds.ydayStart, bounds.ydayEnd];
-      case "week":
-        return [bounds.weekStart, bounds.now];
-      case "month":
-        return [bounds.monthStart, bounds.now];
-      case "year":
-        return [bounds.yearStart, bounds.now];
-      default:
-        return [bounds.todayStart, bounds.now];
+      const [from, until] = (0, import_hydrawise_v2.periodRange)(task.period, bounds);
+      const sensors = await this.v2Section(
+        `flow ${task.period}`,
+        () => this.v2.getFlowSummary(controllerId, from, until)
+      );
+      const entries = task.withReport ? await this.v2Section(`report ${task.period}`, () => this.v2.getReport(controllerId, from, until)) : null;
+      await this.applyV2Usage(
+        task.period,
+        sensors ? (0, import_hydrawise_v2.sumFlow)(sensors) : null,
+        entries ? (0, import_hydrawise_v2.summarizeRuns)(entries) : null
+      );
     }
   }
   /**
@@ -820,6 +775,7 @@ class Hydrawise extends utils.Adapter {
     try {
       const result = await run();
       this.v2Errors[name] = 0;
+      this.v2AnySection = true;
       return result;
     } catch (error) {
       if (error instanceof import_hydrawise_v2.NotAuthorizedError) {
@@ -835,6 +791,20 @@ class Hydrawise extends utils.Adapter {
       }
       return null;
     }
+  }
+  /**
+   * Fire-and-forget write of a connection flag. Stays quiet once the adapter is shutting
+   * down, otherwise the states DB is already closed when the promise resolves.
+   *
+   * @param id id of the state
+   * @param value value to write
+   */
+  writeFlag(id, value) {
+    if (this.unloaded) {
+      return;
+    }
+    this.setStateChangedAsync(id, value, true).catch(() => {
+    });
   }
   /** Id of the controller to query - configured explicitly or the first one of the account */
   async resolveV2Controller() {
@@ -1064,59 +1034,6 @@ class Hydrawise extends utils.Adapter {
     return summary;
   }
   /**
-   * Adds up the flow meters of a controller.
-   *
-   * @param sensors sensors as returned by a flow summary query
-   */
-  sumFlow(sensors) {
-    var _a, _b;
-    const summary = { hasFlowSensor: false, total: 0, unit: "" };
-    for (const sensor of sensors) {
-      if (((_a = sensor == null ? void 0 : sensor.model) == null ? void 0 : _a.sensorType) !== "FLOW") {
-        continue;
-      }
-      const volume = (_b = sensor.flowSummary) == null ? void 0 : _b.totalWaterVolume;
-      summary.hasFlowSensor = true;
-      summary.total += (0, import_hydrawise_v2.localizedNumber)(volume, 0);
-      summary.unit = summary.unit || (0, import_hydrawise_v2.localizedUnit)(volume);
-    }
-    summary.total = Math.round(summary.total * 100) / 100;
-    return summary;
-  }
-  /**
-   * Adds up the runs of a watering report, per controller and per zone.
-   *
-   * @param entries entries of the watering report
-   */
-  summarizeRuns(entries) {
-    const summary = { active: 0, runtime: 0, unit: "", byZone: /* @__PURE__ */ new Map() };
-    for (const entry of entries) {
-      const run = entry == null ? void 0 : entry.runEvent;
-      if (!(run == null ? void 0 : run.zone)) {
-        continue;
-      }
-      const zone = summary.byZone.get(run.zone.id) || { water: 0, runtime: 0, last: null, latest: null };
-      if (!zone.latest || (0, import_hydrawise_v2.dateStamp)(run.scheduledStartTime) >= (0, import_hydrawise_v2.dateStamp)(zone.latest.scheduledStartTime)) {
-        zone.latest = run;
-      }
-      if (run.reportedStartTime) {
-        const water = (0, import_hydrawise_v2.localizedNumber)(run.reportedWaterUsage, 0);
-        const runtime = Number(run.reportedDuration) || 0;
-        summary.active += water;
-        summary.runtime += runtime;
-        summary.unit = summary.unit || (0, import_hydrawise_v2.localizedUnit)(run.reportedWaterUsage);
-        zone.water += water;
-        zone.runtime += runtime;
-        if (!zone.last || (0, import_hydrawise_v2.dateStamp)(run.reportedEndTime) >= (0, import_hydrawise_v2.dateStamp)(zone.last.reportedEndTime)) {
-          zone.last = run;
-        }
-      }
-      summary.byZone.set(run.zone.id, zone);
-    }
-    summary.active = Math.round(summary.active * 100) / 100;
-    return summary;
-  }
-  /**
    * Water usage of one period.
    *
    * @param period the period these numbers belong to
@@ -1129,7 +1046,7 @@ class Hydrawise extends utils.Adapter {
     }
     await this.ensureV2Channel("water", "Water usage");
     const unit = (volume == null ? void 0 : volume.unit) || (usage == null ? void 0 : usage.unit) || "l";
-    if (volume == null ? void 0 : volume.hasFlowSensor) {
+    if ((volume == null ? void 0 : volume.hasFlowSensor) && (volume.hasValue || period === "today" || period === "yesterday")) {
       await this.setV2State(`water.${period}`, { name: `water usage ${period}`, unit }, volume.total);
     }
     if (!usage) {
@@ -1145,19 +1062,9 @@ class Hydrawise extends utils.Adapter {
       await this.setV2State(
         `water.${period}Inactive`,
         { name: `water used outside of watering ${period}`, unit },
-        this.inactiveVolume(volume, usage)
+        (0, import_hydrawise_v2.inactiveVolume)(volume, usage)
       );
     }
-  }
-  /**
-   * Water that flowed without a zone running. The watering report and the flow summary are
-   * not updated at the same time, so a negative difference only means the report is ahead.
-   *
-   * @param volume total volume through the flow meters
-   * @param usage watering report of the same period
-   */
-  inactiveVolume(volume, usage) {
-    return volume.total > usage.active ? Math.round((volume.total - usage.active) * 100) / 100 : 0;
   }
   /**
    * Per zone water usage of the current day - zones without a run are reset to zero.
@@ -1233,15 +1140,20 @@ class Hydrawise extends utils.Adapter {
     if (!(volume == null ? void 0 : volume.hasFlowSensor) || !usage) {
       return;
     }
-    if (zones == null ? void 0 : zones.anyRunning) {
+    if (!zones || zones.anyRunning) {
       return;
     }
     const threshold = Number(this.config.leakThreshold) || 0;
-    const inactive = this.inactiveVolume(volume, usage);
+    if (threshold <= 0) {
+      return;
+    }
+    const suspected = (0, import_hydrawise_v2.inactiveVolume)(volume, usage) > threshold;
+    const confirmed = suspected && this.leakSeen;
+    this.leakSeen = suspected;
     await this.setV2State(
       "water.leakSuspected",
       { name: "water used today without any zone running", type: "boolean", role: "indicator.alarm" },
-      threshold > 0 && inactive > threshold
+      confirmed
     );
   }
   /**
@@ -1269,7 +1181,8 @@ class Hydrawise extends utils.Adapter {
     if (value === void 0 || this.unloaded) {
       return;
     }
-    if (!this.v2Objects.has(id)) {
+    const unit = typeof common.unit === "string" ? common.unit : "";
+    if (!this.v2Objects.has(id) || unit && this.v2Units[id] !== unit) {
       const definition = {
         name: id.split(".").pop(),
         type: "number",
@@ -1285,6 +1198,7 @@ class Hydrawise extends utils.Adapter {
         await this.extendObjectAsync(id, { common: { unit: definition.unit } });
       }
       this.v2Objects.add(id);
+      this.v2Units[id] = unit;
     }
     await this.setStateChangedAsync(id, value, true);
   }

@@ -8,19 +8,61 @@
  * is allowed to read, without touching the running adapter.
  *
  *   node tools/check-v2.js [instance]      # default instance: 0
+ *
+ * Set IOB_BIN when the ioBroker CLI does not sit three directories above this file.
  */
 
 const { execFileSync } = require('node:child_process');
-const { tools } = require('@iobroker/js-controller-common');
-const { HydrawiseV2, periodBounds, localizedNumber, localizedUnit, dateValue } = require('../build/lib/hydrawise-v2');
+const { statSync } = require('node:fs');
+const path = require('node:path');
+const {
+    HydrawiseV2,
+    dateValue,
+    localizedNumber,
+    localizedUnit,
+    periodBounds,
+    periodRange,
+    sumFlow,
+    summarizeRuns,
+} = require('../build/lib/hydrawise-v2');
 
 const instance = process.argv[2] || '0';
+const PERIODS = ['today', 'yesterday', 'week', 'month', 'year'];
 
-function getObject(id) {
-    const raw = execFileSync('/opt/iobroker/iobroker', ['object', 'get', id], { encoding: 'utf-8' });
-    return JSON.parse(raw);
+/** Absolute path of the ioBroker CLI - never a bare name, that would be a PATH hijack */
+function iobrokerBin() {
+    const candidates = [process.env.IOB_BIN, path.resolve(__dirname, '../../../iobroker'), '/opt/iobroker/iobroker'];
+    // a bare existence check would happily return the iobroker user's home directory
+    const found = candidates.find(candidate => {
+        try {
+            return !!candidate && statSync(candidate).isFile();
+        } catch {
+            return false;
+        }
+    });
+
+    if (!found) {
+        throw new Error('cannot find the ioBroker CLI - set IOB_BIN to its absolute path');
+    }
+
+    return found;
 }
 
+/**
+ * Reads one object through the ioBroker CLI
+ *
+ * @param id id of the object
+ */
+function getObject(id) {
+    return JSON.parse(execFileSync(iobrokerBin(), ['object', 'get', id], { encoding: 'utf-8' }));
+}
+
+/**
+ * Runs one query and reports whether it worked
+ *
+ * @param name label of the section
+ * @param run the query to run
+ */
 async function section(name, run) {
     process.stdout.write(`\n### ${name}\n`);
     try {
@@ -33,20 +75,14 @@ async function section(name, run) {
     }
 }
 
-function summarizeReport(entries) {
-    let water = 0;
-    let runtime = 0;
-    let ran = 0;
-    for (const entry of entries) {
-        const run = entry.runEvent;
-        if (!run?.reportedStartTime) {
-            continue;
-        }
-        ran++;
-        water += localizedNumber(run.reportedWaterUsage, 0);
-        runtime += Number(run.reportedDuration) || 0;
-    }
-    return { entries: entries.length, ran, water: Math.round(water * 100) / 100, runtime };
+/**
+ * Keeps enough of an address to recognize it, not enough to reuse it
+ *
+ * @param email the account address
+ */
+function maskEmail(email) {
+    const [local, domain] = String(email).split('@');
+    return `${local.slice(0, 1)}***@${domain ?? '?'}`;
 }
 
 async function main() {
@@ -58,10 +94,12 @@ async function main() {
         process.exit(1);
     }
 
-    const password = config.password.startsWith('$/aes') ? tools.decrypt(secret, config.password) : config.password;
+    // the field is listed in encryptedNative, so the stored value is always encrypted
+    const { tools } = require('@iobroker/js-controller-common');
+    const password = tools.decrypt(secret, config.password);
 
-    console.log(`account   : ${config.email}`);
-    console.log(`password  : ${'*'.repeat(8)} (${password.length} characters)`);
+    console.log(`account   : ${maskEmail(config.email)}`);
+    console.log(`password  : ${'*'.repeat(8)}`);
 
     const client = new HydrawiseV2(config.email, password, {
         debug: message => console.log(`  debug: ${message}`),
@@ -110,43 +148,38 @@ async function main() {
             const runs = zone.scheduledRuns || {};
             console.log(
                 `  zone ${zone.number?.value} "${zone.name}" (id ${zone.id}) running=${!!runs.currentRun}` +
-                    ` next=${dateValue(runs.nextRun?.startTime) ?? dateValue(zone.status?.nextRun)}` +
+                    ` next=${dateValue(runs.nextRun?.startTime)}` +
                     ` nextDuration=${runs.nextRun?.duration} normal=${runs.nextRun?.normalDuration}` +
                     ` balance=${zone.status?.relativeWaterBalance}%`,
             );
         }
     }
 
-    for (const [name, from, until] of [
-        ['today', bounds.todayStart, bounds.now],
-        ['yesterday', bounds.ydayStart, bounds.ydayEnd],
-        ['week', bounds.weekStart, bounds.now],
-        ['month', bounds.monthStart, bounds.now],
-        ['year', bounds.yearStart, bounds.now],
-    ]) {
-        const sensors = await section(`flow summary ${name}`, () => client.getFlowSummary(controllerId, from, until));
+    for (const period of PERIODS) {
+        const [from, until] = periodRange(period, bounds);
+        const sensors = await section(`flow summary ${period}`, () => client.getFlowSummary(controllerId, from, until));
 
         if (sensors) {
-            for (const sensor of sensors.filter(s => s.model?.sensorType === 'FLOW')) {
-                const volume = sensor.flowSummary?.totalWaterVolume;
-                console.log(
-                    `  ${sensor.name}: ${localizedNumber(volume, 0)} ${localizedUnit(volume, '-')} (null = nothing flowed)`,
-                );
-            }
+            const volume = sumFlow(sensors);
+            console.log(
+                `  ${volume.total} ${volume.unit || '-'} over ${sensors.length} sensor(s)` +
+                    `${volume.hasValue ? '' : ' (every meter answered null - nothing flowed)'}`,
+            );
         }
     }
 
-    for (const [name, from, until] of [
-        ['today', bounds.todayStart, bounds.now],
-        ['yesterday', bounds.ydayStart, bounds.ydayEnd],
-    ]) {
-        const entries = await section(`watering report ${name}`, () => client.getReport(controllerId, from, until));
+    for (const period of ['today', 'yesterday']) {
+        const [from, until] = periodRange(period, bounds);
+        const entries = await section(`watering report ${period}`, () => client.getReport(controllerId, from, until));
 
         if (entries) {
-            const summary = summarizeReport(entries);
+            const usage = summarizeRuns(entries);
+            const ran = entries.filter(entry => entry?.runEvent?.reportedStartTime).length;
+
             console.log(
-                `  ${summary.entries} scheduled, ${summary.ran} actually ran, ${summary.water} l, ${summary.runtime} s`,
+                `  ${entries.length} scheduled, ${ran} actually ran, ${usage.active} ${usage.unit || '-'}, ${usage.runtime} s`,
             );
+
             for (const entry of entries.slice(0, 8)) {
                 const run = entry.runEvent;
                 console.log(

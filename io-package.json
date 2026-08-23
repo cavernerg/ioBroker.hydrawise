@@ -1,8 +1,21 @@
 {
   "common": {
     "name": "hydrawise",
-    "version": "1.1.0",
+    "version": "1.1.1",
     "news": {
+      "1.1.1": {
+        "en": "review fixes: transient login errors no longer stop the v2 polling, info.connectionV2 follows the actual poll result, fewer false leak alarms, no redirects on the password grant",
+        "de": "Review-Korrekturen: vorübergehende Login-Fehler stoppen die v2-Abfrage nicht mehr, info.connectionV2 folgt dem tatsächlichen Poll-Ergebnis, weniger Fehlalarme der Leck-Erkennung, keine Weiterleitungen beim Passwort-Grant",
+        "ru": "исправления по итогам ревью: временные ошибки входа больше не останавливают опрос v2, info.connectionV2 отражает реальный результат опроса, меньше ложных тревог об утечке, без редиректов при передаче пароля",
+        "pt": "correções da revisão: erros de login temporários já não param a consulta v2, info.connectionV2 segue o resultado real, menos alarmes falsos de fuga, sem redirecionamentos no envio da palavra-passe",
+        "nl": "reviewcorrecties: tijdelijke inlogfouten stoppen de v2-polling niet meer, info.connectionV2 volgt het werkelijke resultaat, minder valse lekmeldingen, geen omleidingen bij het wachtwoord",
+        "fr": "corrections de revue : les erreurs de connexion temporaires n'arrêtent plus l'interrogation v2, info.connectionV2 suit le résultat réel, moins de fausses alertes de fuite, pas de redirection lors de l'envoi du mot de passe",
+        "it": "correzioni dalla revisione: gli errori di accesso temporanei non fermano più il polling v2, info.connectionV2 segue il risultato reale, meno falsi allarmi di perdita, nessun redirect per la password",
+        "es": "correcciones de la revisión: los errores de inicio de sesión temporales ya no detienen el sondeo v2, info.connectionV2 refleja el resultado real, menos falsas alarmas de fuga, sin redirecciones al enviar la contraseña",
+        "pl": "poprawki z przeglądu: chwilowe błędy logowania nie zatrzymują już odpytywania v2, info.connectionV2 odzwierciedla rzeczywisty wynik, mniej fałszywych alarmów wycieku, brak przekierowań przy haśle",
+        "uk": "виправлення після рев’ю: тимчасові помилки входу більше не зупиняють опитування v2, info.connectionV2 відповідає реальному результату, менше хибних тривог про витік, без перенаправлень для пароля",
+        "zh-cn": "评审修复：临时登录错误不再中止 v2 轮询，info.connectionV2 反映实际轮询结果，减少漏水误报，密码请求不再跟随重定向"
+      },
       "1.1.0": {
         "en": "added support for the Hydrawise v2 API (water usage, sensor states, zone reports, rainfall, leak detection)",
         "de": "Unterstützung für die Hydrawise-v2-API ergänzt (Wasserverbrauch, Sensorzustände, Zonen-Reports, Regenmenge, Leck-Erkennung)",
@@ -80,19 +93,6 @@
         "pl": "stałe problemy wykryte przez kontroler repozytorium",
         "uk": "виправлені питання, виявлені репозиторійним чекером",
         "zh-cn": "仓库检查器检测到的固定问题"
-      },
-      "1.0.1": {
-        "en": "added compatibility check and testing for node.js 22",
-        "de": "kompatibilitätsprüfung und test für node.js 22",
-        "ru": "проверка совместимости и тестирование для node.js 22",
-        "pt": "verificação de compatibilidade adicionada e teste para node.js 22",
-        "nl": "toegevoegde compatibiliteitscontrole en testen voor node.js 22",
-        "fr": "vérification et essais de compatibilité pour node.js 22",
-        "it": "controllo della compatibilità aggiunto e test per node.js 22",
-        "es": "comprobación de compatibilidad añadido y pruebas para node.js 22",
-        "pl": "dodane sprawdzenie zgodności i testowanie na node.js 22",
-        "uk": "додано перевірку сумісності та тестування для node.js 22",
-        "zh-cn": "为节点.js 22 添加兼容性检查和测试"
       }
     },
     "titleLang": {
@@ -179,6 +179,7 @@
   ],
   "protectedNative": [
     "apiKey",
+    "email",
     "password"
   ],
   "objects": [],
@@ -209,7 +210,19 @@
       "type": "state",
       "common": {
         "role": "indicator.connected",
-        "name": "v2 API connected",
+        "name": {
+          "en": "v2 API connected",
+          "de": "v2-API verbunden",
+          "ru": "v2 API подключен",
+          "pt": "API v2 conectada",
+          "nl": "v2 API verbonden",
+          "fr": "API v2 connectée",
+          "it": "API v2 connessa",
+          "es": "API v2 conectada",
+          "pl": "API v2 połączone",
+          "uk": "API v2 підключено",
+          "zh-cn": "v2 API 已连接"
+        },
         "type": "boolean",
         "read": true,
         "write": false,

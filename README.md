@@ -47,7 +47,8 @@ date. Default interval 5 minutes, independent of the v1 interval.
 minus the sum of the reported runs). Exceeds it the configured threshold — in the unit of your
 account, default 20, `0` disables the check — `water.leakSuspected` is set. The verdict is suspended
 while a zone is running, because the report only records a run once it has finished and the flow
-meter is ahead of it until then.
+meter is ahead of it until then — and for the same reason (plus runs that span midnight) it only
+latches once two consecutive polls agree.
 
 ## 3. Fixes in the v1 branch
 
@@ -67,7 +68,9 @@ meter is ahead of it until then.
 `customerdetails.php` allows only **5 requests per 5 minutes** and the counter is stickier than
 documented. It now polls on its own interval (default 30 minutes, `customerInterval`), is paused
 with a growing backoff (5 → 30 minutes) after an HTTP 429 instead of being hammered, and a rate
-limit no longer sets `info.connection` to false.
+limit no longer sets `info.connection` to false. Note for existing installs: the upstream
+adapter polled this endpoint every 5 minutes, so `customer.*` (controller name, serial number)
+now refreshes six times less often unless you lower `customerInterval`.
 
 ## 5. Diagnostics
 
@@ -78,7 +81,7 @@ node tools/check-v2.js 0
 
 Reads the credentials from the instance configuration (decrypted through `tools.decrypt` of
 `@iobroker/js-controller-common`), runs every query and prints OK/error per section together with
-the raw values. The password is never printed.
+the raw values. The password is never printed and the account address is masked.
 
 `npm run validate:translations` checks that `admin/i18n/<lang>.json` and `admin/jsonConfig.json`
 stay in sync across all 11 languages.
@@ -89,6 +92,21 @@ stay in sync across all 11 languages.
     Placeholder for the next version (at the beginning of the line):
     ### **WORK IN PROGRESS**
 -->
+### 1.1.1 (2026-08-23)
+
+- (cavernerg) **FIXED**: `water.yesterdayInactive` was never created — the flow summary and the watering report of a period were fetched in separate turns, so the leak share of a finished day could not be worked out
+- (cavernerg) **FIXED**: a transient HTTP 429 or 5xx from the login endpoint was reported as wrong credentials and stopped the v2 polling until the next adapter restart
+- (cavernerg) **FIXED**: a GraphQL endpoint answering 401 for good no longer triggers a fresh login on every poll — the adapter stops instead of hammering the account
+- (cavernerg) **FIXED**: `info.connectionV2` stayed `true` while every single query failed; it now follows what the poll actually returned
+- (cavernerg) **FIXED**: the leak indicator could fire on a run spanning midnight, or when the snapshot query failed while a zone was watering — it now needs two consecutive polls and knowledge of the running zones, and it is no longer created at all when the check is switched off
+- (cavernerg) **FIXED**: a state created while nothing had flowed kept the fallback unit for the rest of the adapter run instead of taking the account's unit once the API reported one
+- (cavernerg) **FIXED**: a flow summary in which every meter answers `null` no longer overwrites `water.week`/`month`/`year` with 0
+- (cavernerg) **FIXED**: polls no longer overlap when one takes longer than the poll interval
+- (cavernerg) **FIXED**: `subscribeStates` is registered only with a configured API key again (as upstream did), so a zone button without a key can no longer produce an unhandled rejection
+- (cavernerg) **FIXED**: the poll interval warning compared the configured value instead of the clamped one that actually runs
+- (cavernerg) **SECURITY**: the password grant no longer follows redirects — a 307/308 would have replayed the credentials to the redirect target — and `email` joins `password` in `protectedNative`
+- (cavernerg) **ENHANCED**: `tools/check-v2.js` masks the account address, no longer prints the password length, finds the ioBroker CLI without a hardcoded path, and shares the adapter's own aggregation helpers instead of its own copies
+
 ### 1.1.0 (2026-08-23)
 
 - (cavernerg) **NEW**: optional support for the Hydrawise v2 API (OAuth2 + GraphQL): water usage per day/week/month/year, consumption and runtime per zone, sensor states, controller details and rainfall
@@ -98,6 +116,8 @@ stay in sync across all 11 languages.
 - (cavernerg) **FIXED**: `last_contact` was parsed as an epoch value even when the API answers `"Unknown"`, leaving the state at `Invalid Date`
 - (cavernerg) **FIXED**: no more "DB closed" errors in the log when the adapter shuts down
 - (cavernerg) **ENHANCED**: `customerdetails.php` polls on its own interval (default 30 minutes) with a backoff after HTTP 429, and a rate limit no longer sets `info.connection` to false
+- (cavernerg) **FIXED**: `lastErrorCode` was a local variable that reset on every request, so the "do not repeat the same error" suppression never took effect
+- (cavernerg) **ENHANCED**: the adapter warns once when the API asks to be polled more often than the configured interval
 
 Changelog of the original adapter: [upstream README](https://github.com/SentiQ/ioBroker.hydrawise#changelog)
 and [CHANGELOG_OLD.md](CHANGELOG_OLD.md).

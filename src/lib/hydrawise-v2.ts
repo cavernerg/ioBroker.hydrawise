@@ -251,6 +251,9 @@ export class HydrawiseV2 {
             timeout: REQUEST_TIMEOUT,
             responseType: 'json',
             validateStatus: () => true,
+            // a 307/308 would replay the body - and with it the account password - to
+            // whatever host the redirect points at
+            maxRedirects: 0,
         });
 
         const body = response.data || {};
@@ -261,6 +264,16 @@ export class HydrawiseV2 {
                 this.log.debug(`refreshing the v2 token failed (${JSON.stringify(body.error)}), logging in again`);
                 this.refreshToken = null;
                 return this.fetchToken(false);
+            }
+
+            // a 429 or a 5xx says nothing about the credentials - treating it as a login
+            // failure would stop the v2 polling for good over a transient server problem
+            if (response.status === 429) {
+                throw new ThrottledError('login: too many requests');
+            }
+
+            if (![400, 401, 403].includes(response.status) || !body.error) {
+                throw new Error(`login: HTTP ${response.status} ${String(body.message || body.error || '')}`.trim());
             }
 
             this.reset();
@@ -305,6 +318,7 @@ export class HydrawiseV2 {
             timeout: REQUEST_TIMEOUT,
             responseType: 'json',
             validateStatus: () => true,
+            maxRedirects: 0,
         });
     }
 
@@ -325,6 +339,13 @@ export class HydrawiseV2 {
             this.token = null;
             await this.ensureToken();
             response = await this.post(query, variables);
+
+            if (response.status === 401) {
+                // the credentials are good enough for a token but the account cannot use
+                // the API - retrying every poll would hammer the login endpoint forever
+                this.reset();
+                throw new NotAuthorizedError(`${name}: the account is not authorized for the v2 API`);
+            }
         }
 
         if (response.status === 429) {
@@ -470,4 +491,136 @@ export function dateStamp(date: ApiDateTime | null | undefined): number {
     const parsed = Date.parse(date?.value ?? '');
 
     return Number.isNaN(parsed) ? 0 : parsed;
+}
+
+/** Periods the water usage is reported for */
+export type Period = 'today' | 'yesterday' | 'week' | 'month' | 'year';
+
+/** Total volume through the flow meters of a controller for one period */
+export interface FlowSummary {
+    hasFlowSensor: boolean;
+    /** false when every flow meter answered null, so the total is an assumption, not a reading */
+    hasValue: boolean;
+    total: number;
+    unit: string;
+}
+
+/** Water usage of one reporting period, taken from the watering report */
+export interface UsageSummary {
+    active: number;
+    runtime: number;
+    unit: string;
+    byZone: Map<number, { water: number; runtime: number; last: any; latest: any }>;
+}
+
+/**
+ * Start and end of a reporting period.
+ *
+ * @param period the period to look up
+ * @param bounds start/end of the reporting periods
+ */
+export function periodRange(period: Period, bounds: PeriodBounds): [number, number] {
+    switch (period) {
+        case 'yesterday':
+            return [bounds.ydayStart, bounds.ydayEnd];
+        case 'week':
+            return [bounds.weekStart, bounds.now];
+        case 'month':
+            return [bounds.monthStart, bounds.now];
+        case 'year':
+            return [bounds.yearStart, bounds.now];
+        default:
+            return [bounds.todayStart, bounds.now];
+    }
+}
+
+/**
+ * Adds up the flow meters of a controller.
+ *
+ * @param sensors sensors as returned by a flow summary query
+ */
+export function sumFlow(sensors: any[]): FlowSummary {
+    const summary: FlowSummary = { hasFlowSensor: false, hasValue: false, total: 0, unit: '' };
+
+    for (const sensor of sensors) {
+        if (sensor?.model?.sensorType !== 'FLOW') {
+            continue;
+        }
+
+        const volume = sensor.flowSummary?.totalWaterVolume;
+        // the API answers with null when nothing flowed in that period - for a short period
+        // that is a zero, for a long one the caller may prefer to keep the previous value
+        const reading = localizedNumber(volume);
+
+        summary.hasFlowSensor = true;
+        summary.hasValue = summary.hasValue || reading !== null;
+        summary.total += reading ?? 0;
+        summary.unit = summary.unit || localizedUnit(volume);
+    }
+
+    summary.total = Math.round(summary.total * 100) / 100;
+
+    return summary;
+}
+
+/**
+ * Adds up the runs of a watering report, per controller and per zone.
+ *
+ * @param entries entries of the watering report
+ */
+export function summarizeRuns(entries: any[]): UsageSummary {
+    const summary: UsageSummary = { active: 0, runtime: 0, unit: '', byZone: new Map() };
+
+    for (const entry of entries) {
+        const run = entry?.runEvent;
+
+        if (!run?.zone) {
+            continue;
+        }
+
+        const zone = summary.byZone.get(run.zone.id) || { water: 0, runtime: 0, last: null, latest: null };
+
+        // entries without a reported start were scheduled but did not run - they still
+        // carry the reason (rain sensor, suspension), which is worth keeping
+        if (!zone.latest || dateStamp(run.scheduledStartTime) >= dateStamp(zone.latest.scheduledStartTime)) {
+            zone.latest = run;
+        }
+
+        if (run.reportedStartTime) {
+            const water = localizedNumber(run.reportedWaterUsage, 0) as number;
+            const runtime = Number(run.reportedDuration) || 0;
+
+            summary.active += water;
+            summary.runtime += runtime;
+            summary.unit = summary.unit || localizedUnit(run.reportedWaterUsage);
+
+            zone.water += water;
+            zone.runtime += runtime;
+
+            if (!zone.last || dateStamp(run.reportedEndTime) >= dateStamp(zone.last.reportedEndTime)) {
+                zone.last = run;
+            }
+        }
+
+        summary.byZone.set(run.zone.id, zone);
+    }
+
+    summary.active = Math.round(summary.active * 100) / 100;
+
+    for (const zone of summary.byZone.values()) {
+        zone.water = Math.round(zone.water * 100) / 100;
+    }
+
+    return summary;
+}
+
+/**
+ * Water that flowed without a zone running. The watering report and the flow summary are
+ * not updated at the same time, so a negative difference only means the report is ahead.
+ *
+ * @param volume total volume through the flow meters
+ * @param usage watering report of the same period
+ */
+export function inactiveVolume(volume: FlowSummary, usage: UsageSummary): number {
+    return volume.total > usage.active ? Math.round((volume.total - usage.active) * 100) / 100 : 0;
 }
