@@ -22,13 +22,11 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
   mod
 ));
 var utils = __toESM(require("@iobroker/adapter-core"));
-var import_axios = __toESM(require("axios"));
 var import_hydrawise_v2 = require("./lib/hydrawise-v2");
+var import_http = require("./lib/http");
 const hydrawise_url = "https://api.hydrawise.com";
 let nextpollSchedule = null;
 let nextpollCustomer = null;
-let resetSwitch = null;
-const RELAYS = Object;
 const RATE_LIMIT_PAUSE = 5 * 60 * 1e3;
 const RATE_LIMIT_PAUSE_MAX = 30 * 60 * 1e3;
 const V2_PERIOD_TASKS = [
@@ -54,6 +52,15 @@ class Hydrawise extends utils.Adapter {
   blockedUntil = {};
   backoff = {};
   pollIntervalWarned = false;
+  /** relay number (as used in the object ids) to the relay id the API wants */
+  relays = /* @__PURE__ */ new Map();
+  /** one pending reset of `runDefault` per zone */
+  resetSwitches = /* @__PURE__ */ new Map();
+  /** objects this adapter run has already made sure of, to spare the objects DB */
+  knownObjects = /* @__PURE__ */ new Set();
+  v2Throttled = false;
+  v2Backoff = 0;
+  v2PausedUntil = 0;
   constructor(options = {}) {
     super({
       ...options,
@@ -70,12 +77,8 @@ class Hydrawise extends utils.Adapter {
     } else {
       const scheduleInterval = Math.max(15, Number(this.config.apiInterval) || 60) * 1e3;
       const customerInterval = Math.max(5, Number(this.config.customerInterval) || 30) * 60 * 1e3;
-      try {
-        await this.GetStatusSchedule();
-        await this.GetCustomerDetails();
-      } catch (error) {
-        this.log.error(error.toString());
-      }
+      await this.GetStatusSchedule();
+      await this.GetCustomerDetails();
       nextpollSchedule = this.setInterval(() => {
         void this.GetStatusSchedule();
       }, scheduleInterval);
@@ -101,7 +104,7 @@ class Hydrawise extends utils.Adapter {
         if ((response == null ? void 0 : response.status) === 200) {
           const content = response.data;
           void this.setStateChangedAsync("info.connection", true, true);
-          await this.setObjectNotExistsAsync("schedule.stopall", {
+          await this.ensureObject("schedule.stopall", {
             type: "state",
             common: {
               name: {
@@ -124,7 +127,7 @@ class Hydrawise extends utils.Adapter {
             },
             native: {}
           });
-          await this.setObjectNotExistsAsync("schedule.runall", {
+          await this.ensureObject("schedule.runall", {
             type: "state",
             common: {
               name: {
@@ -148,7 +151,7 @@ class Hydrawise extends utils.Adapter {
             },
             native: {}
           });
-          await this.setObjectNotExistsAsync("schedule.suspendall", {
+          await this.ensureObject("schedule.suspendall", {
             type: "state",
             common: {
               name: {
@@ -173,8 +176,8 @@ class Hydrawise extends utils.Adapter {
           });
           for (let key in content) {
             key = this.name2id(key);
-            if (key !== "relays" && key !== "sensors" && key !== "expanders" && !Number.isNaN(key)) {
-              await this.setObjectNotExistsAsync(`schedule.${key}`, {
+            if (key !== "relays" && key !== "sensors" && key !== "expanders") {
+              await this.ensureObject(`schedule.${key}`, {
                 type: "state",
                 common: {
                   name: key,
@@ -187,7 +190,7 @@ class Hydrawise extends utils.Adapter {
               });
               void this.setStateChangedAsync(`schedule.${key}`, content[key], true);
               if (key === "time") {
-                await this.setObjectNotExistsAsync("schedule.timestr", {
+                await this.ensureObject("schedule.timestr", {
                   type: "state",
                   common: {
                     name: "last api call",
@@ -209,17 +212,17 @@ class Hydrawise extends utils.Adapter {
               break;
             }
             const name = relay.relay;
-            await this.setObjectNotExistsAsync(`schedule.${relay.relay}`, {
+            await this.ensureObject(`schedule.${relay.relay}`, {
               type: "channel",
               common: {
                 name: name.toString()
               },
               native: {}
             });
-            RELAYS[relay.relay] = relay.relay_id;
+            this.relays.set(String(relay.relay), relay.relay_id);
             for (let key in relay) {
               key = this.name2id(key);
-              await this.setObjectNotExistsAsync(`schedule.${relay.relay}.${key}`, {
+              await this.ensureObject(`schedule.${relay.relay}.${key}`, {
                 type: "state",
                 common: {
                   name: key,
@@ -237,7 +240,7 @@ class Hydrawise extends utils.Adapter {
               }
               void this.setStateChangedAsync(`schedule.${relay.relay}.${key}`, relay[key], true);
             }
-            await this.setObjectNotExistsAsync(`schedule.${relay.relay}.stopZone`, {
+            await this.ensureObject(`schedule.${relay.relay}.stopZone`, {
               type: "state",
               common: {
                 name: {
@@ -260,7 +263,7 @@ class Hydrawise extends utils.Adapter {
               },
               native: {}
             });
-            await this.setObjectNotExistsAsync(`schedule.${relay.relay}.runZone`, {
+            await this.ensureObject(`schedule.${relay.relay}.runZone`, {
               type: "state",
               common: {
                 name: {
@@ -283,7 +286,7 @@ class Hydrawise extends utils.Adapter {
               },
               native: {}
             });
-            await this.setObjectNotExistsAsync(`schedule.${relay.relay}.suspendZone`, {
+            await this.ensureObject(`schedule.${relay.relay}.suspendZone`, {
               type: "state",
               common: {
                 name: {
@@ -306,7 +309,7 @@ class Hydrawise extends utils.Adapter {
               },
               native: {}
             });
-            await this.setObjectNotExistsAsync(`schedule.${relay.relay}.runDefault`, {
+            await this.ensureObject(`schedule.${relay.relay}.runDefault`, {
               type: "state",
               common: {
                 name: {
@@ -334,7 +337,7 @@ class Hydrawise extends utils.Adapter {
             if (this.unloaded) {
               break;
             }
-            await this.setObjectNotExistsAsync(`schedule.sensors.${sensor.input}`, {
+            await this.ensureObject(`schedule.sensors.${sensor.input}`, {
               type: "channel",
               common: {
                 name: "sensors"
@@ -344,7 +347,7 @@ class Hydrawise extends utils.Adapter {
             for (let key in sensor) {
               if (key !== "relays") {
                 key = this.name2id(key);
-                await this.setObjectNotExistsAsync(`schedule.sensors.${sensor.input}.${key}`, {
+                await this.ensureObject(`schedule.sensors.${sensor.input}.${key}`, {
                   type: "state",
                   common: {
                     name: key,
@@ -386,9 +389,9 @@ class Hydrawise extends utils.Adapter {
           const content = response.data;
           void this.setStateChangedAsync("info.connection", true, true);
           for (let key in content) {
-            if (key !== "controllers" && !Number.isNaN(key)) {
+            if (key !== "controllers") {
               key = this.name2id(key);
-              await this.setObjectNotExistsAsync(`customer.${key}`, {
+              await this.ensureObject(`customer.${key}`, {
                 type: "state",
                 common: {
                   name: key,
@@ -406,7 +409,7 @@ class Hydrawise extends utils.Adapter {
             if (this.unloaded) {
               break;
             }
-            await this.setObjectNotExistsAsync(`customer.controllers.${controller.name}`, {
+            await this.ensureObject(`customer.controllers.${controller.name}`, {
               type: "channel",
               common: {
                 name: controller.name
@@ -415,7 +418,7 @@ class Hydrawise extends utils.Adapter {
             });
             for (let key in controller) {
               key = this.name2id(key);
-              await this.setObjectNotExistsAsync(`customer.controllers.${controller.name}.${key}`, {
+              await this.ensureObject(`customer.controllers.${controller.name}.${key}`, {
                 type: "state",
                 common: {
                   name: key,
@@ -445,47 +448,89 @@ class Hydrawise extends utils.Adapter {
       });
     });
   }
-  buildRequest(service, params) {
-    return new Promise((resolve, reject) => {
-      const url = `/api/v1/${service}`;
-      if (params.api_key) {
-        try {
-          (0, import_axios.default)({
-            method: "GET",
-            baseURL: hydrawise_url,
-            url,
-            timeout: 3e4,
-            responseType: "json",
-            params
-          }).then((response) => {
-            this.lastErrorCode = 0;
-            this.backoff[service] = 0;
-            this.blockedUntil[service] = 0;
-            resolve(response);
-          }).catch((error) => {
-            if (error.response) {
-              this.log.warn(
-                `received ${error.response.status} response from ${url} with content: ${JSON.stringify(error.response.data)}`
-              );
-            } else if (error.request) {
-              if (error.code === this.lastErrorCode) {
-                this.log.debug(error.message);
-              } else {
-                this.log.info(`error ${error.code} from ${url}: ${error.message}`);
-                this.lastErrorCode = error.code;
-              }
-            } else {
-              this.log.error(error.message);
-            }
-            reject(error instanceof Error ? error : new Error(String(error)));
-          });
-        } catch (error) {
-          reject(error instanceof Error ? error : new Error(String(error)));
+  /**
+   * Makes sure an object exists - asks the objects DB only once per adapter run.
+   *
+   * @param id id of the object
+   * @param object the object to create when it is missing
+   */
+  async ensureObject(id, object) {
+    if (this.knownObjects.has(id) || this.unloaded) {
+      return;
+    }
+    await this.setObjectNotExistsAsync(id, object);
+    this.knownObjects.add(id);
+  }
+  /**
+   * Calls an endpoint of the v1 API. Rejects with an HttpError for every status but 2xx
+   * and with a NetworkError when the API did not answer.
+   *
+   * @param service endpoint of the v1 API
+   * @param params query parameters, including the api_key
+   */
+  async buildRequest(service, params) {
+    var _a;
+    if (!params.api_key) {
+      throw new Error("API key is not configured");
+    }
+    const url = new URL(`/api/v1/${service}`, hydrawise_url);
+    for (const [key, value] of Object.entries(params)) {
+      if (value !== void 0 && value !== null) {
+        url.searchParams.set(key, String(value));
+      }
+    }
+    try {
+      const response = await (0, import_http.requestJson)(url, { timeout: 3e4 });
+      if (response.status < 200 || response.status >= 300) {
+        throw new import_http.HttpError(response.status, response.data);
+      }
+      this.lastErrorCode = 0;
+      this.backoff[service] = 0;
+      this.blockedUntil[service] = 0;
+      return response;
+    } catch (error) {
+      if (error instanceof import_http.HttpError) {
+        this.log.warn(
+          `received ${error.status} response from ${service} with content: ${JSON.stringify(error.data)}`
+        );
+      } else if (error instanceof import_http.NetworkError) {
+        if (error.code === this.lastErrorCode) {
+          this.log.debug(error.message);
+        } else {
+          this.log.info(`error ${error.code} from ${service}: ${error.message}`);
+          this.lastErrorCode = error.code;
         }
       } else {
-        reject(new Error("API key is not configured"));
+        this.log.error((_a = error == null ? void 0 : error.message) != null ? _a : String(error));
       }
-    });
+      throw error;
+    }
+  }
+  /**
+   * Sends a zone command. A command that fails is reported and dropped - it must never
+   * surface as an unhandled rejection, which would restart the adapter.
+   *
+   * @param params action and its parameters
+   */
+  async sendCommand(params) {
+    var _a;
+    try {
+      await this.buildRequest("setzone.php", { api_key: this.config.apiKey, ...params });
+    } catch (error) {
+      this.log.warn(`command "${String(params.action)}" was not accepted: ${(_a = error == null ? void 0 : error.message) != null ? _a : String(error)}`);
+    }
+  }
+  /**
+   * The id the API uses for a relay, undefined (and a warning) before the first poll knew it
+   *
+   * @param relay relay number as used in the object ids
+   */
+  relayId(relay) {
+    const id = this.relays.get(relay);
+    if (id === void 0) {
+      this.log.warn(`zone ${relay} is not known (yet) - command ignored`);
+    }
+    return id;
   }
   /**
    * Is called when adapter shuts down - callback has to be called under any circumstances!
@@ -498,6 +543,10 @@ class Hydrawise extends utils.Adapter {
       this.clearInterval(nextpollSchedule);
       this.clearInterval(nextpollCustomer);
       this.clearInterval(this.v2Timer);
+      for (const timer of this.resetSwitches.values()) {
+        this.clearTimeout(timer);
+      }
+      this.resetSwitches.clear();
       callback();
     } catch {
       callback();
@@ -510,82 +559,106 @@ class Hydrawise extends utils.Adapter {
    * @param state state object
    */
   onStateChange(id, state) {
-    if (state && !state.ack) {
-      if (id.indexOf("stopall") !== -1) {
-        void this.buildRequest("setzone.php", { api_key: this.config.apiKey, action: "stopall" });
-      } else if (id.indexOf("stop") !== -1) {
-        const relay = id.match(/.*schedule\.(.*)\.stopZone/);
-        if (relay && (relay == null ? void 0 : relay.length) > 1) {
-          void this.buildRequest("setzone.php", {
-            api_key: this.config.apiKey,
-            action: "stop",
-            relay_id: RELAYS[relay[1]]
-          });
-        }
+    if (!state || state.ack) {
+      return;
+    }
+    const seconds = Number(state.val);
+    const hasSeconds = (typeof state.val === "number" || typeof state.val === "string" && state.val.trim() !== "") && Number.isFinite(seconds) && seconds >= 0;
+    const relayOf = (name) => {
+      var _a;
+      return (_a = id.match(new RegExp(`.*schedule\\.(.*)\\.${name}$`))) == null ? void 0 : _a[1];
+    };
+    const secondsOf = (name) => {
+      if (!hasSeconds) {
+        this.log.warn(
+          `${name} expects a number of seconds, got ${JSON.stringify(state.val)} - command ignored`
+        );
       }
-      if (id.indexOf("runall") !== -1 && (state.val || state.val === 0)) {
-        void this.buildRequest("setzone.php", {
-          api_key: this.config.apiKey,
-          action: "runall",
+      return hasSeconds;
+    };
+    if (id.endsWith(".stopall")) {
+      void this.sendCommand({ action: "stopall" });
+    } else if (id.endsWith(".stopZone")) {
+      const relay = relayOf("stopZone");
+      const relayId = relay ? this.relayId(relay) : void 0;
+      if (relayId !== void 0) {
+        void this.sendCommand({ action: "stop", relay_id: relayId });
+      }
+    } else if (id.endsWith(".runall")) {
+      if (secondsOf("runall")) {
+        void this.sendCommand({ action: "runall", period_id: 999, custom: Math.trunc(seconds) });
+      }
+    } else if (id.endsWith(".runZone")) {
+      const relay = relayOf("runZone");
+      const relayId = relay && secondsOf("runZone") ? this.relayId(relay) : void 0;
+      if (relayId !== void 0) {
+        void this.sendCommand({
+          action: "run",
           period_id: 999,
-          custom: state.val
+          custom: Math.trunc(seconds),
+          relay_id: relayId
         });
-      } else if (id.indexOf("runZone") !== -1 && (state.val || state.val === 0)) {
-        const relay = id.match(/.*schedule\.(.*)\.runZone/);
-        if (relay && (relay == null ? void 0 : relay.length) > 1) {
-          void this.buildRequest("setzone.php", {
-            api_key: this.config.apiKey,
-            action: "run",
-            period_id: 999,
-            custom: state.val,
-            relay_id: RELAYS[relay[1]]
-          });
-        }
       }
-      if (id.indexOf("runDefault") !== -1 && state.val !== null) {
-        void this.initRunDefault(id, state.val);
+    } else if (id.endsWith(".runDefault")) {
+      if (state.val !== null) {
+        void this.initRunDefault(id, !!state.val);
       }
-      if (id.indexOf("suspendall") !== -1 && (state.val || state.val === 0)) {
-        const num = state.val;
-        void this.buildRequest("setzone.php", {
-          api_key: this.config.apiKey,
+    } else if (id.endsWith(".suspendall")) {
+      if (secondsOf("suspendall")) {
+        void this.sendCommand({
           action: "suspendall",
           period_id: 999,
-          custom: Math.trunc((state.ts + num) / 1e3)
+          custom: Math.trunc(state.ts / 1e3) + Math.trunc(seconds)
         });
-      } else if (id.indexOf("suspend") !== -1 && (state.val || state.val === 0)) {
-        const num = state.val;
-        const relay = id.match(/.*schedule\.(.*)\.suspendZone/);
-        if (relay && (relay == null ? void 0 : relay.length) > 1) {
-          void this.buildRequest("setzone.php", {
-            api_key: this.config.apiKey,
-            action: "suspend",
-            period_id: 999,
-            custom: Math.trunc((state.ts + num) / 1e3),
-            relay_id: RELAYS[relay[1]]
-          });
-        }
+      }
+    } else if (id.endsWith(".suspendZone")) {
+      const relay = relayOf("suspendZone");
+      const relayId = relay && secondsOf("suspendZone") ? this.relayId(relay) : void 0;
+      if (relayId !== void 0) {
+        void this.sendCommand({
+          action: "suspend",
+          period_id: 999,
+          custom: Math.trunc(state.ts / 1e3) + Math.trunc(seconds),
+          relay_id: relayId
+        });
       }
     }
   }
+  /**
+   * Runs a zone for its default time, or stops it.
+   *
+   * @param id id of the `runDefault` state
+   * @param run true starts the zone, false stops it
+   */
   async initRunDefault(id, run) {
+    var _a;
     const relay = id.match(/(.*schedule.*\.)runDefault/);
-    this.clearTimeout(resetSwitch);
-    if (relay) {
-      if (run) {
-        const defaultRunTime = await this.getStateAsync(`${relay[1]}run`);
-        if (defaultRunTime && defaultRunTime.val) {
-          void this.setState(`${relay[1]}runZone`, defaultRunTime.val, false);
-          resetSwitch = this.setTimeout(
-            () => {
-              void this.setState(id, false, false);
-            },
-            defaultRunTime.val * 1e3
-          );
-        }
-      } else {
-        void this.setState(`${relay[1]}stopZone`, true, false);
+    if (!relay) {
+      return;
+    }
+    this.clearTimeout(this.resetSwitches.get(id));
+    this.resetSwitches.delete(id);
+    try {
+      if (!run) {
+        await this.setStateAsync(`${relay[1]}stopZone`, true, false);
+        return;
       }
+      const defaultRunTime = await this.getStateAsync(`${relay[1]}run`);
+      const seconds = Number(defaultRunTime == null ? void 0 : defaultRunTime.val) || 0;
+      if (seconds <= 0) {
+        return;
+      }
+      await this.setStateAsync(`${relay[1]}runZone`, seconds, false);
+      this.resetSwitches.set(
+        id,
+        this.setTimeout(() => {
+          this.resetSwitches.delete(id);
+          this.setStateAsync(id, false, true).catch(() => {
+          });
+        }, seconds * 1e3)
+      );
+    } catch (error) {
+      this.log.warn(`runDefault failed: ${(_a = error == null ? void 0 : error.message) != null ? _a : String(error)}`);
     }
   }
   /**
@@ -608,15 +681,15 @@ class Hydrawise extends utils.Adapter {
    * @param error the error the request failed with
    */
   handleRequestError(service, error) {
-    var _a, _b;
-    if (((_a = error == null ? void 0 : error.response) == null ? void 0 : _a.status) === 429) {
+    var _a;
+    if (error instanceof import_http.HttpError && error.status === 429) {
       const pause = Math.min(Math.max((this.backoff[service] || 0) * 2, RATE_LIMIT_PAUSE), RATE_LIMIT_PAUSE_MAX);
       this.backoff[service] = pause;
       this.blockedUntil[service] = Date.now() + pause;
       this.log.info(`${service} hit the API rate limit - pausing it for ${Math.round(pause / 6e4)} minutes`);
       return;
     }
-    this.log.debug(`(${service}) received error - API is now offline: ${(_b = error == null ? void 0 : error.message) != null ? _b : String(error)}`);
+    this.log.debug(`(${service}) received error - API is now offline: ${(_a = error == null ? void 0 : error.message) != null ? _a : String(error)}`);
     this.writeFlag("info.connection", false);
   }
   /**
@@ -684,8 +757,13 @@ class Hydrawise extends utils.Adapter {
     if (!this.v2 || this.unloaded || this.v2Polling) {
       return;
     }
+    if (Date.now() < this.v2PausedUntil) {
+      this.log.debug(`(v2) paused until ${new Date(this.v2PausedUntil).toLocaleTimeString()}`);
+      return;
+    }
     this.v2Polling = true;
     this.v2AnySection = false;
+    this.v2Throttled = false;
     try {
       const controllerId = await this.resolveV2Controller();
       if (controllerId === null) {
@@ -731,11 +809,26 @@ class Hydrawise extends utils.Adapter {
         this.stopV2(`login failed - check e-mail and password (${error.message})`);
         return;
       }
-      this.writeFlag("info.connectionV2", false);
-      this.log.warn(`(v2) poll failed: ${error.message}`);
+      if (error instanceof import_hydrawise_v2.ThrottledError) {
+        this.v2Throttled = true;
+      } else {
+        this.writeFlag("info.connectionV2", false);
+        this.log.warn(`(v2) poll failed: ${error.message}`);
+      }
     } finally {
       this.v2Polling = false;
+      this.applyV2Throttle();
     }
+  }
+  /** After a rate limited poll the v2 API is left alone for a while, longer on every repeat */
+  applyV2Throttle() {
+    if (!this.v2Throttled) {
+      this.v2Backoff = 0;
+      return;
+    }
+    this.v2Backoff = Math.min(Math.max(this.v2Backoff * 2, 2 * RATE_LIMIT_PAUSE), 2 * RATE_LIMIT_PAUSE_MAX);
+    this.v2PausedUntil = Date.now() + this.v2Backoff - 5e3;
+    this.log.info(`(v2) hit the API rate limit - pausing for ${Math.round(this.v2Backoff / 6e4)} minutes`);
   }
   /**
    * Yesterday, week, month and year in turn. A parameterized field must not appear twice
@@ -772,6 +865,9 @@ class Hydrawise extends utils.Adapter {
    * @param run the query to run
    */
   async v2Section(name, run) {
+    if (this.v2Throttled) {
+      return null;
+    }
     try {
       const result = await run();
       this.v2Errors[name] = 0;
@@ -783,6 +879,7 @@ class Hydrawise extends utils.Adapter {
       }
       const count = this.v2Errors[name] = (this.v2Errors[name] || 0) + 1;
       if (error instanceof import_hydrawise_v2.ThrottledError) {
+        this.v2Throttled = true;
         this.log.debug(`(v2) ${error.message}`);
       } else if (count <= 3) {
         this.log.warn(`(v2) query "${name}" failed: ${error.message}`);

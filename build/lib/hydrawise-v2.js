@@ -1,9 +1,7 @@
 "use strict";
-var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
 var __getOwnPropNames = Object.getOwnPropertyNames;
-var __getProtoOf = Object.getPrototypeOf;
 var __hasOwnProp = Object.prototype.hasOwnProperty;
 var __export = (target, all) => {
   for (var name in all)
@@ -17,14 +15,6 @@ var __copyProps = (to, from, except, desc) => {
   }
   return to;
 };
-var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__getProtoOf(mod)) : {}, __copyProps(
-  // If the importer is in node compatibility mode or this is not an ESM
-  // file that has been converted to a CommonJS file using a Babel-
-  // compatible transform (i.e. "__esModule" has not been set), then set
-  // "default" to the CommonJS "module.exports" for node compatibility.
-  isNodeMode || !mod || !mod.__esModule ? __defProp(target, "default", { value: mod, enumerable: true }) : target,
-  mod
-));
 var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
 var hydrawise_v2_exports = {};
 __export(hydrawise_v2_exports, {
@@ -42,19 +32,25 @@ __export(hydrawise_v2_exports, {
   summarizeRuns: () => summarizeRuns
 });
 module.exports = __toCommonJS(hydrawise_v2_exports);
-var import_axios = __toESM(require("axios"));
+var import_http = require("./http");
 const TOKEN_URL = "https://app.hydrawise.com/api/v2/oauth/access-token";
 const GRAPHQL_URL = "https://app.hydrawise.com/api/v2/graph";
 const CLIENT_ID = "hydrawise_app";
 const CLIENT_SECRET = "zn3CrjglwNV1";
 const REQUEST_TIMEOUT = 3e4;
 class NotAuthorizedError extends Error {
+  /**
+   * @param message what the API answered
+   */
   constructor(message) {
     super(message);
     this.name = "NotAuthorizedError";
   }
 }
 class ThrottledError extends Error {
+  /**
+   * @param message what the API answered
+   */
   constructor(message) {
     super(message);
     this.name = "ThrottledError";
@@ -171,6 +167,11 @@ const QUERY_REPORT = `query WateringReport($cid: Int!, $from: Int!, $until: Int!
     }
 }`;
 class HydrawiseV2 {
+  /**
+   * @param email e-mail address of the Hydrawise account
+   * @param password password of the Hydrawise account
+   * @param log where to report to
+   */
   constructor(email, password, log) {
     this.email = email;
     this.password = password;
@@ -201,19 +202,16 @@ class HydrawiseV2 {
       data.set("username", this.email);
       data.set("password", this.password);
     }
-    const response = await (0, import_axios.default)({
+    const response = await (0, import_http.requestJson)(TOKEN_URL, {
       method: "POST",
-      url: TOKEN_URL,
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      data: data.toString(),
+      body: data.toString(),
       timeout: REQUEST_TIMEOUT,
-      responseType: "json",
-      validateStatus: () => true,
       // a 307/308 would replay the body - and with it the account password - to
       // whatever host the redirect points at
-      maxRedirects: 0
+      redirect: "manual"
     });
-    const body = response.data || {};
+    const body = response.data && typeof response.data === "object" ? response.data : {};
     if (body.error || !body.access_token) {
       if (useRefresh) {
         this.log.debug(`refreshing the v2 token failed (${JSON.stringify(body.error)}), logging in again`);
@@ -250,18 +248,15 @@ class HydrawiseV2 {
     await this.pendingAuth;
   }
   async post(query, variables) {
-    return (0, import_axios.default)({
+    return (0, import_http.requestJson)(GRAPHQL_URL, {
       method: "POST",
-      url: GRAPHQL_URL,
       headers: {
         "Content-Type": "application/json",
         Authorization: `${this.tokenType} ${this.token}`
       },
-      data: { query, variables },
+      body: JSON.stringify({ query, variables }),
       timeout: REQUEST_TIMEOUT,
-      responseType: "json",
-      validateStatus: () => true,
-      maxRedirects: 0
+      redirect: "manual"
     });
   }
   /**

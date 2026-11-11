@@ -1,8 +1,21 @@
 {
   "common": {
     "name": "hydrawise",
-    "version": "1.1.1",
+    "version": "1.1.2",
     "news": {
+      "1.1.2": {
+        "en": "native fetch instead of axios, a failed zone command no longer restarts the adapter, suspend takes seconds as documented, back-off when the v2 API throttles, fewer object DB reads, updated dependencies",
+        "de": "natives fetch statt axios, ein fehlgeschlagener Zonenbefehl startet den Adapter nicht mehr neu, Suspend rechnet wie dokumentiert in Sekunden, Pause bei Drosselung der v2-API, weniger Objekt-DB-Zugriffe, aktualisierte Abhängigkeiten",
+        "ru": "встроенный fetch вместо axios, неудачная команда зоны больше не перезапускает адаптер, приостановка считается в секундах, пауза при ограничении запросов v2, меньше обращений к базе объектов, обновлены зависимости",
+        "pt": "fetch nativo em vez de axios, um comando de zona falhado já não reinicia o adaptador, a suspensão conta em segundos, pausa quando a API v2 limita os pedidos, menos leituras da base de objetos, dependências atualizadas",
+        "nl": "native fetch in plaats van axios, een mislukt zonecommando herstart de adapter niet meer, onderbreken rekent in seconden, pauze bij begrenzing door de v2-API, minder leesacties op de objectendatabase, bijgewerkte afhankelijkheden",
+        "fr": "fetch natif au lieu d'axios, une commande de zone échouée ne redémarre plus l'adaptateur, la suspension compte en secondes, pause quand l'API v2 limite les requêtes, moins de lectures de la base d'objets, dépendances mises à jour",
+        "it": "fetch nativo al posto di axios, un comando di zona fallito non riavvia più l'adattatore, la sospensione conta in secondi, pausa quando l'API v2 limita le richieste, meno letture del database oggetti, dipendenze aggiornate",
+        "es": "fetch nativo en lugar de axios, un comando de zona fallido ya no reinicia el adaptador, la suspensión cuenta en segundos, pausa cuando la API v2 limita las peticiones, menos lecturas de la base de objetos, dependencias actualizadas",
+        "pl": "natywny fetch zamiast axios, nieudane polecenie strefy nie restartuje już adaptera, zawieszenie liczone w sekundach, przerwa przy ograniczaniu przez API v2, mniej odczytów bazy obiektów, zaktualizowane zależności",
+        "uk": "вбудований fetch замість axios, невдала команда зони більше не перезапускає адаптер, призупинення рахується в секундах, пауза при обмеженні запитів v2, менше звернень до бази об’єктів, оновлено залежності",
+        "zh-cn": "使用原生 fetch 取代 axios，分区命令失败不再重启适配器，暂停时长按秒计算，v2 API 限流时自动退避，减少对象数据库读取，更新依赖"
+      },
       "1.1.1": {
         "en": "review fixes: transient login errors no longer stop the v2 polling, info.connectionV2 follows the actual poll result, fewer false leak alarms, no redirects on the password grant",
         "de": "Review-Korrekturen: vorübergehende Login-Fehler stoppen die v2-Abfrage nicht mehr, info.connectionV2 folgt dem tatsächlichen Poll-Ergebnis, weniger Fehlalarme der Leck-Erkennung, keine Weiterleitungen beim Passwort-Grant",
@@ -80,19 +93,6 @@
         "pl": "zaktualizowane zależności",
         "uk": "оновлені залежності",
         "zh-cn": "更新的依赖关系"
-      },
-      "1.0.2": {
-        "en": "fixed issues detected by repository checker",
-        "de": "von repository checker erkannte probleme",
-        "ru": "фиксированные проблемы, выявленные регистратором",
-        "pt": "problemas corrigidos detectados pelo verificador de repositório",
-        "nl": "vaste problemen gedetecteerd door repository checker",
-        "fr": "problèmes corrigés détectés par le vérificateur du dépôt",
-        "it": "problemi fissi rilevati da repository checker",
-        "es": "problemas fijos detectados por el repositorio",
-        "pl": "stałe problemy wykryte przez kontroler repozytorium",
-        "uk": "виправлені питання, виявлені репозиторійним чекером",
-        "zh-cn": "仓库检查器检测到的固定问题"
       }
     },
     "titleLang": {

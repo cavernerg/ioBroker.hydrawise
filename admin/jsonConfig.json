@@ -14,7 +14,7 @@
             "xl": 12
         },
         "apiKey": {
-            "type": "text",
+            "type": "password",
             "label": "api key",
             "newLine": true,
             "help": "how to get token",

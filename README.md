@@ -92,6 +92,19 @@ stay in sync across all 11 languages.
     Placeholder for the next version (at the beginning of the line):
     ### **WORK IN PROGRESS**
 -->
+### 1.1.2 (2026-11-11)
+
+- (cavernerg) **FIXED**: a zone command that failed (timeout, HTTP 429) ended as an unhandled rejection and restarted the adapter — it is now reported as a warning and dropped
+- (cavernerg) **FIXED**: `suspendZone`/`suspendall` added the value to a millisecond timestamp, so "3600" suspended for 3.6 seconds — the value is now seconds, as the state names say
+- (cavernerg) **FIXED**: the pending reset of `runDefault` was shared by all zones, and the reset itself was written as a command and sent a stop to the API — every zone has its own reset now and it is acknowledged
+- (cavernerg) **FIXED**: the relay ids were stored as properties of the global `Object` constructor
+- (cavernerg) **FIXED**: `npm test` failed with TS5011 — the unit tests run again, and the aggregation helpers and the HTTP client are covered
+- (cavernerg) **ENHANCED**: `axios` is gone, all requests use the `fetch` that ships with Node.js — `@iobroker/adapter-core` is the only runtime dependency left
+- (cavernerg) **ENHANCED**: when the v2 API answers "too many requests" the rest of the poll is skipped and the API is left alone for 10 to 60 minutes
+- (cavernerg) **ENHANCED**: objects of the v1 tree are checked once per adapter run instead of on every poll (about 200 object DB reads per minute less)
+- (cavernerg) **ENHANCED**: run and suspend commands only accept a number of seconds, commands are matched by the exact state name
+- (cavernerg) **SECURITY**: the API key is a password field in the admin UI; updated dependencies (no known vulnerability left in the runtime tree); removed the yarn configuration that switched off the package age gate
+
 ### 1.1.1 (2026-08-23)
 
 - (cavernerg) **FIXED**: `water.yesterdayInactive` was never created — the flow summary and the watering report of a period were fetched in separate turns, so the leak share of a finished day could not be worked out

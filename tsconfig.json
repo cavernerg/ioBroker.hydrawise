@@ -13,6 +13,8 @@
         "checkJs": true,
 
         "noEmitOnError": true,
+        // without it TypeScript 6 refuses to guess the layout of the output (TS5011)
+        "rootDir": "./src",
         "outDir": "./build/",
         "removeComments": false,
 

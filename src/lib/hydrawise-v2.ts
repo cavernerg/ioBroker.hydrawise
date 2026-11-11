@@ -14,7 +14,7 @@
  *    list twice. Every parameterized call therefore gets its own request.
  */
 
-import axios from 'axios';
+import { requestJson, type JsonResponse } from './http';
 
 const TOKEN_URL = 'https://app.hydrawise.com/api/v2/oauth/access-token';
 const GRAPHQL_URL = 'https://app.hydrawise.com/api/v2/graph';
@@ -25,17 +25,25 @@ const CLIENT_SECRET = 'zn3CrjglwNV1';
 
 const REQUEST_TIMEOUT = 30000;
 
+/** Where the client reports to - the adapter hands in its own log */
 export interface V2Logger {
+    /** details only needed while debugging */
     debug: (message: string) => void;
+    /** things worth knowing in normal operation */
     info: (message: string) => void;
+    /** something went wrong but the client carries on */
     warn: (message: string) => void;
+    /** something went wrong for good */
     error: (message: string) => void;
 }
 
 /** A value together with the unit the account is configured for (l/gal, mm/in, °C/°F) */
 export interface LocalizedValue {
+    /** the number, null when the API has nothing to report */
     value: number | null;
+    /** short unit like `l` or `gal` */
     unit: string | null;
+    /** spelled out unit like `litres` */
     longUnit?: string | null;
 }
 
@@ -51,17 +59,25 @@ export interface LocalizedValue {
 
 /** The API's DateTime object */
 export interface ApiDateTime {
+    /** the point in time as text */
     value: string | null;
+    /** the point in time in epoch seconds */
     timestamp: number | null;
 }
 
+/** A controller of the account */
 export interface V2Controller {
+    /** id the API addresses the controller with */
     id: number;
+    /** name the user gave it */
     name: string | null;
 }
 
 /** Thrown for wrong credentials - retrying with the same credentials is pointless */
 export class NotAuthorizedError extends Error {
+    /**
+     * @param message what the API answered
+     */
     public constructor(message: string) {
         super(message);
         this.name = 'NotAuthorizedError';
@@ -70,6 +86,9 @@ export class NotAuthorizedError extends Error {
 
 /** Thrown when the API rejects the request because of rate limiting */
 export class ThrottledError extends Error {
+    /**
+     * @param message what the API answered
+     */
     public constructor(message: string) {
         super(message);
         this.name = 'ThrottledError';
@@ -197,16 +216,25 @@ const QUERY_REPORT = `query WateringReport($cid: Int!, $from: Int!, $until: Int!
     }
 }`;
 
+/** Start and end of the reporting periods, all in epoch seconds */
 export interface PeriodBounds {
+    /** local midnight of the current day */
     todayStart: number;
+    /** the reference point in time */
     now: number;
+    /** local midnight of the day before */
     ydayStart: number;
+    /** last second of the day before */
     ydayEnd: number;
+    /** midnight six days ago - the week is the last seven days, not the calendar week */
     weekStart: number;
+    /** first day of the current month */
     monthStart: number;
+    /** first day of the current year */
     yearStart: number;
 }
 
+/** Client for the v2 API: keeps the OAuth2 token alive and runs the GraphQL queries */
 export class HydrawiseV2 {
     private token: string | null = null;
     private tokenType = 'Bearer';
@@ -214,6 +242,11 @@ export class HydrawiseV2 {
     private expires = 0;
     private pendingAuth: Promise<void> | null = null;
 
+    /**
+     * @param email e-mail address of the Hydrawise account
+     * @param password password of the Hydrawise account
+     * @param log where to report to
+     */
     public constructor(
         private readonly email: string,
         private readonly password: string,
@@ -243,20 +276,18 @@ export class HydrawiseV2 {
             data.set('password', this.password);
         }
 
-        const response = await axios({
+        const response = await requestJson(TOKEN_URL, {
             method: 'POST',
-            url: TOKEN_URL,
             headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-            data: data.toString(),
+            body: data.toString(),
             timeout: REQUEST_TIMEOUT,
-            responseType: 'json',
-            validateStatus: () => true,
             // a 307/308 would replay the body - and with it the account password - to
             // whatever host the redirect points at
-            maxRedirects: 0,
+            redirect: 'manual',
         });
 
-        const body = response.data || {};
+        // anything but a JSON object (a proxy error page) carries neither token nor error
+        const body = response.data && typeof response.data === 'object' ? response.data : {};
 
         if (body.error || !body.access_token) {
             // a rejected refresh token is not a credential problem - start over with a full login
@@ -306,19 +337,16 @@ export class HydrawiseV2 {
         await this.pendingAuth;
     }
 
-    private async post(query: string, variables: Record<string, unknown>): Promise<any> {
-        return axios({
+    private async post(query: string, variables: Record<string, unknown>): Promise<JsonResponse> {
+        return requestJson(GRAPHQL_URL, {
             method: 'POST',
-            url: GRAPHQL_URL,
             headers: {
                 'Content-Type': 'application/json',
                 Authorization: `${this.tokenType} ${this.token}`,
             },
-            data: { query, variables },
+            body: JSON.stringify({ query, variables }),
             timeout: REQUEST_TIMEOUT,
-            responseType: 'json',
-            validateStatus: () => true,
-            maxRedirects: 0,
+            redirect: 'manual',
         });
     }
 
@@ -498,18 +526,25 @@ export type Period = 'today' | 'yesterday' | 'week' | 'month' | 'year';
 
 /** Total volume through the flow meters of a controller for one period */
 export interface FlowSummary {
+    /** the controller has at least one flow meter */
     hasFlowSensor: boolean;
     /** false when every flow meter answered null, so the total is an assumption, not a reading */
     hasValue: boolean;
+    /** sum over all flow meters */
     total: number;
+    /** volume unit the account is set to */
     unit: string;
 }
 
 /** Water usage of one reporting period, taken from the watering report */
 export interface UsageSummary {
+    /** water used by all runs of the period */
     active: number;
+    /** seconds the zones ran */
     runtime: number;
+    /** volume unit the account is set to */
     unit: string;
+    /** per zone id: its sums, the run that ended last and the most recent entry, run or not */
     byZone: Map<number, { water: number; runtime: number; last: any; latest: any }>;
 }
 
